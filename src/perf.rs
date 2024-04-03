@@ -1,13 +1,26 @@
 use bitfield::bitfield;
 
+use self::perf_sys::{
+    __BindgenBitfieldUnit, perf_event_attr, perf_event_attr__bindgen_ty_1,
+    perf_event_attr__bindgen_ty_2, perf_event_attr__bindgen_ty_3, perf_event_attr__bindgen_ty_4,
+};
+
 mod perf_sys {
     include!(concat!(env!("OUT_DIR"), "/perf-sys.rs"));
 }
+
+type PerfEventConfigType = u64;
+type FdType = i64;
+
 #[derive(Debug)]
 pub enum BuilderError {
-    TypeIdUnset,
-    SamplePeriodAndFreqSet,
-    WakeupEventsandWatermarkSet,
+    Unset,
+    BitImpossible,
+}
+
+#[derive(Debug)]
+pub enum EventOpenError {
+    SyscallError,
 }
 
 /// Set in the type field of the perf_event_attr struct.
@@ -19,26 +32,179 @@ pub enum TypeId {
     Raw,
     Breakpoint,
     Max,
-    _unset,
 }
 
 impl TypeId {
-    fn to_perf_sys(&self) -> Result<u32, BuilderError> {
+    fn to_perf_sys(&self) -> u32 {
         match self {
-            TypeId::Hardware => Ok(perf_sys::perf_type_id_PERF_TYPE_HARDWARE),
-            TypeId::Software => Ok(perf_sys::perf_type_id_PERF_TYPE_SOFTWARE),
-            TypeId::Tracepoint => Ok(perf_sys::perf_type_id_PERF_TYPE_TRACEPOINT),
-            TypeId::HardwareCache => Ok(perf_sys::perf_type_id_PERF_TYPE_HW_CACHE),
-            TypeId::Raw => Ok(perf_sys::perf_type_id_PERF_TYPE_RAW),
-            TypeId::Breakpoint => Ok(perf_sys::perf_type_id_PERF_TYPE_BREAKPOINT),
-            TypeId::Max => Ok(perf_sys::perf_type_id_PERF_TYPE_MAX),
-            TypeId::_unset => Err(BuilderError::TypeIdUnset),
+            TypeId::Hardware => perf_sys::perf_type_id_PERF_TYPE_HARDWARE,
+            TypeId::Software => perf_sys::perf_type_id_PERF_TYPE_SOFTWARE,
+            TypeId::Tracepoint => perf_sys::perf_type_id_PERF_TYPE_TRACEPOINT,
+            TypeId::HardwareCache => perf_sys::perf_type_id_PERF_TYPE_HW_CACHE,
+            TypeId::Raw => perf_sys::perf_type_id_PERF_TYPE_RAW,
+            TypeId::Breakpoint => perf_sys::perf_type_id_PERF_TYPE_BREAKPOINT,
+            TypeId::Max => perf_sys::perf_type_id_PERF_TYPE_MAX,
         }
     }
 }
 
+// From <linux/perf_event.h>
+// PERF_TYPE_HW_CACHE:          0xEEEEEEEE00DDCCBB
+//                   BB: hardware cache ID
+//                   CC: hardware cache op ID
+//                   DD: hardware cache op result ID
+//                   EEEEEEEE: PMU type ID
+bitfield! {
+    struct PerfHwCacheConfig(u64);
+    cache_id, set_cache_id: 0, 2;
+    op_id, set_op_id: 2, 2;
+    result_id, set_result_id: 4, 2;
+}
+
+impl Into<PerfEventConfigType> for PerfHwCacheConfig {
+    fn into(self) -> PerfEventConfigType {
+        self.0
+    }
+}
+
+pub enum PerfHwCacheId {
+    L1D,
+    L1I,
+    LL,
+    DTLB,
+    ITLB,
+    BPU,
+    Node,
+    Max,
+    _unset,
+}
+
+impl Into<u64> for PerfHwCacheId {
+    fn into(self) -> u64 {
+        match self {
+            Self::L1D => 0,
+            Self::L1I => 1,
+            Self::LL => 2,
+            Self::DTLB => 3,
+            Self::ITLB => 4,
+            Self::BPU => 5,
+            Self::Node => 6,
+            Self::Max => 7,
+            Self::_unset => 8,
+        }
+    }
+}
+
+pub enum PerfHwCacheOpId {
+    Read,
+    Write,
+    Prefetch,
+    Max,
+    _unset,
+}
+
+impl Into<u64> for PerfHwCacheOpId {
+    fn into(self) -> u64 {
+        match self {
+            Self::Read => 0,
+            Self::Write => 1,
+            Self::Prefetch => 2,
+            Self::Max => 3,
+            Self::_unset => 4,
+        }
+    }
+}
+
+pub enum PerfHwCacheOpResultId {
+    Access,
+    Miss,
+    Max,
+    _unset,
+}
+
+impl Into<u64> for PerfHwCacheOpResultId {
+    fn into(self) -> u64 {
+        match self {
+            Self::Access => 0,
+            Self::Miss => 1,
+            Self::Max => 2,
+            Self::_unset => 3,
+        }
+    }
+}
+
+pub struct PerfHwCacheConfigBuilder {
+    hw_cache_id: PerfHwCacheId,
+    op_id: PerfHwCacheOpId,
+    result_id: PerfHwCacheOpResultId,
+}
+
+impl PerfHwCacheConfigBuilder {
+    pub fn new() -> PerfHwCacheConfigBuilder {
+        PerfHwCacheConfigBuilder {
+            hw_cache_id: PerfHwCacheId::_unset,
+            op_id: PerfHwCacheOpId::_unset,
+            result_id: PerfHwCacheOpResultId::_unset,
+        }
+    }
+
+    pub fn validate_build(&self) -> Result<(), BuilderError> {
+        if let PerfHwCacheId::_unset = self.hw_cache_id {
+            return Err(BuilderError::Unset);
+        }
+        if let PerfHwCacheOpId::_unset = self.op_id {
+            return Err(BuilderError::Unset);
+        }
+        if let PerfHwCacheOpResultId::_unset = self.result_id {
+            return Err(BuilderError::Unset);
+        }
+        Ok(())
+    }
+
+    pub fn cache_id(mut self, hw_cache_id: PerfHwCacheId) -> Self {
+        self.hw_cache_id = hw_cache_id;
+        self
+    }
+
+    pub fn op_id(mut self, op_id: PerfHwCacheOpId) -> Self {
+        self.op_id = op_id;
+        self
+    }
+
+    pub fn result_id(mut self, result_id: PerfHwCacheOpResultId) -> Self {
+        self.result_id = result_id;
+        self
+    }
+
+    fn build(self) -> Result<PerfHwCacheConfig, BuilderError> {
+        if let PerfHwCacheId::_unset = self.hw_cache_id {
+            return Err(BuilderError::Unset);
+        }
+        if let PerfHwCacheOpId::_unset = self.op_id {
+            return Err(BuilderError::Unset);
+        }
+        if let PerfHwCacheOpResultId::_unset = self.result_id {
+            return Err(BuilderError::Unset);
+        }
+
+        let mut config = PerfHwCacheConfig(0);
+        config.set_cache_id(self.hw_cache_id.into());
+        config.set_op_id(self.op_id.into());
+        config.set_result_id(self.result_id.into());
+        Ok(config)
+    }
+}
+
+impl TryInto<PerfEventConfigType> for PerfHwCacheConfigBuilder {
+    type Error = BuilderError;
+
+    fn try_into(self) -> Result<PerfEventConfigType, Self::Error> {
+        self.build().map(|config| config.into())
+    }
+}
+
 /// Set in the sample_type field of the perf_event_attr struct.
-pub enum SampleType {
+pub enum SampleFormat {
     IP,
     TID,
     Time,
@@ -68,7 +234,7 @@ pub enum SampleType {
     _unset,
 }
 
-impl SampleType {
+impl SampleFormat {
     fn to_perf_sys(&self) -> Result<u64, BuilderError> {
         match self {
             Self::IP => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_IP),
@@ -97,7 +263,7 @@ impl SampleType {
             Self::CodePageSize => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_CODE_PAGE_SIZE),
             Self::WeightStruct => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_WEIGHT_STRUCT),
             Self::Max => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_MAX),
-            Self::_unset => Err(BuilderError::TypeIdUnset),
+            Self::_unset => Err(BuilderError::Unset),
         }
     }
 }
@@ -126,316 +292,290 @@ impl ReadFormat {
             Self::Group => Ok(perf_sys::perf_event_read_format_PERF_FORMAT_GROUP as u64),
             Self::Lost => Ok(perf_sys::perf_event_read_format_PERF_FORMAT_LOST as u64),
             Self::Max => Ok(perf_sys::perf_event_read_format_PERF_FORMAT_MAX as u64),
-            Self::_unset => Err(BuilderError::TypeIdUnset),
+            Self::_unset => Err(BuilderError::Unset),
         }
     }
 }
 
-/// Flags for the event_attr struct.
-/// PreciseIPSkid = 0 => arbitrary skid
-/// PreciseIPNoSkid = 1 => constant skid
-/// PreciseIPNoSkid = 2 => request no skid
-/// PreciseIPNoSkid = 3 => require no skid
-#[repr(u64)]
 pub enum EventAttrFlags {
-    Disabled = 0,
-    Inherit = 1,
-    Pinned = 2,
-    Exclusive = 3,
-    ExcludeUser = 4,
-    ExcludeKernel = 5,
-    ExcludeHV = 6,
-    ExcludeIdle = 7,
-    MMap = 8,
-    Comm = 9,
-    Freq = 10,
-    InheritStat = 11,
-    EnableOnExec = 12,
-    Task = 13,
-    Watermark = 14,
-    PreciseIPSkid = 15,
-    PreciseIPNoSkid = 16,
-    MMapData = 17,
-    SampleIDAll = 18,
-    ExcludeHost = 19,
-    ExcludeGuest = 20,
-    ExcludeCallchainKernel = 21,
-    ExcludeCallchainUser = 22,
-    MMap2 = 23,
-    CommExec = 24,
-    UseClockID = 25,
-    ContextSwitch = 26,
-    WriteBackward = 27,
-    Namespaces = 28,
-    KSymbol = 29,
-    BPFEvent = 30,
-    AuxOutput = 31,
-    CGroup = 32,
-    TextPoke = 33,
-    BuildID = 34,
-    InheritThread = 35,
-    RemoveOnExec = 36,
-    SigTrap = 37,
+    Disabled,
+    Inherit,
+    Pinned,
+    Exclusive,
+    ExcludeUser,
+    ExcludeKernel,
+    ExcludeHV,
+    ExcludeIdle,
+    MMap,
+    Comm,
+    Freq,
+    InheritStat,
+    EnableOnExec,
+    Task,
+    Watermark,
+    PreciseIpAnySkid,
+    PreciseIpConstantSkid,
+    PreciseIpPleaseNoSkid,
+    PreciseIPNoSkid,
+    MMapData,
+    SampleIDAll,
+    ExcludeHost,
+    ExcludeGuest,
+    ExcludeCallchainKernel,
+    ExcludeCallchainUser,
+    MMap2,
+    CommExec,
+    UseClockID,
+    ContextSwitch,
+    WriteBackward,
+    Namespaces,
+    KSymbol,
+    BPFEvent,
+    AuxOutput,
+    CGroup,
+    TextPoke,
+    BuildID,
+    InheritThread,
+    RemoveOnExec,
+    SigTrap,
 }
 
 impl EventAttrFlags {
-    fn set_bitfield(&self, b: &mut EventAttrFlagBits) -> Result<(), BuilderError> {
+    fn set_attr_bitfield(&self, attr: &mut perf_event_attr) {
         match self {
-            Self::Disabled => b.set_disabled(true),
-            Self::Inherit => b.set_inherit(true),
-            Self::Pinned => b.set_pinned(true),
-            Self::Exclusive => b.set_exclusive(true),
-            Self::ExcludeUser => b.set_exclude_user(true),
-            Self::ExcludeKernel => b.set_exclude_kernel(true),
-            Self::ExcludeHV => b.set_exclude_hv(true),
-            Self::ExcludeIdle => b.set_exclude_idle(true),
-            Self::MMap => b.set_mmap(true),
-            Self::Comm => b.set_comm(true),
-            Self::Freq => b.set_freq(true),
-            Self::InheritStat => b.set_inherit_stat(true),
-            Self::EnableOnExec => b.set_enable_on_exec(true),
-            Self::Task => b.set_task(true),
-            Self::Watermark => b.set_watermark(true),
-            Self::PreciseIPSkid => b.set_precise_ip_skid(true),
-            Self::PreciseIPNoSkid => b.set_precise_ip(true),
-            Self::MMapData => b.set_mmap_data(true),
-            Self::SampleIDAll => b.set_sample_id_all(true),
-            Self::ExcludeHost => b.set_exclude_host(true),
-            Self::ExcludeGuest => b.set_exclude_guest(true),
-            Self::ExcludeCallchainKernel => b.set_exclude_callchain_kernel(true),
-            Self::ExcludeCallchainUser => b.set_exclude_callchain_user(true),
-            Self::MMap2 => b.set_mmap2(true),
-            Self::CommExec => b.set_comm_exec(true),
-            Self::UseClockID => b.set_use_clockid(true),
-            Self::ContextSwitch => b.set_context_switch(true),
-            Self::WriteBackward => b.set_write_backward(true),
-            Self::Namespaces => b.set_namespaces(true),
-            Self::KSymbol => b.set_ksymbol(true),
-            Self::BPFEvent => b.set_bpf_event(true),
-            Self::AuxOutput => b.set_aux_output(true),
-            Self::CGroup => b.set_cgroup(true),
-            Self::TextPoke => b.set_text_poke(true),
-            Self::BuildID => b.set_build_id(true),
-            Self::InheritThread => b.set_inherit_thread(true),
-            Self::RemoveOnExec => b.set_remove_on_exec(true),
-            Self::SigTrap => b.set_sigtrap(true),
+            Self::Disabled => attr.set_disabled(1),
+            Self::Inherit => attr.set_inherit(1),
+            Self::Pinned => attr.set_pinned(1),
+            Self::Exclusive => attr.set_exclusive(1),
+            Self::ExcludeUser => attr.set_exclude_user(1),
+            Self::ExcludeKernel => attr.set_exclude_kernel(1),
+            Self::ExcludeHV => attr.set_exclude_hv(1),
+            Self::ExcludeIdle => attr.set_exclude_idle(1),
+            Self::MMap => attr.set_mmap(1),
+            Self::Comm => attr.set_comm(1),
+            Self::Freq => attr.set_freq(1),
+            Self::InheritStat => attr.set_inherit_stat(1),
+            Self::EnableOnExec => attr.set_enable_on_exec(1),
+            Self::Task => attr.set_task(1),
+            Self::Watermark => attr.set_watermark(1),
+            Self::PreciseIpAnySkid => attr.set_precise_ip(0),
+            Self::PreciseIpConstantSkid => attr.set_precise_ip(1),
+            Self::PreciseIpPleaseNoSkid => attr.set_precise_ip(2),
+            Self::PreciseIPNoSkid => attr.set_precise_ip(3),
+            Self::MMapData => attr.set_mmap_data(1),
+            Self::SampleIDAll => attr.set_sample_id_all(1),
+            Self::ExcludeHost => attr.set_exclude_host(1),
+            Self::ExcludeGuest => attr.set_exclude_guest(1),
+            Self::ExcludeCallchainKernel => attr.set_exclude_callchain_kernel(1),
+            Self::ExcludeCallchainUser => attr.set_exclude_callchain_user(1),
+            Self::MMap2 => attr.set_mmap2(1),
+            Self::CommExec => attr.set_comm_exec(1),
+            Self::UseClockID => attr.set_use_clockid(1),
+            Self::ContextSwitch => attr.set_context_switch(1),
+            Self::WriteBackward => attr.set_write_backward(1),
+            Self::Namespaces => attr.set_namespaces(1),
+            Self::KSymbol => attr.set_ksymbol(1),
+            Self::BPFEvent => attr.set_bpf_event(1),
+            Self::AuxOutput => attr.set_aux_output(1),
+            Self::CGroup => attr.set_cgroup(1),
+            Self::TextPoke => attr.set_text_poke(1),
+            Self::BuildID => attr.set_build_id(1),
+            Self::InheritThread => attr.set_inherit_thread(1),
+            Self::RemoveOnExec => attr.set_remove_on_exec(1),
+            Self::SigTrap => attr.set_sigtrap(1),
         };
+    }
+}
+
+pub struct PerfEventBuilder {
+    attr: perf_event_attr,
+}
+
+impl PerfEventBuilder {
+    pub fn new() -> PerfEventBuilder {
+        PerfEventBuilder {
+            attr: perf_event_attr {
+                type_: 0,
+                size: std::mem::size_of::<perf_event_attr>() as u32,
+                config: 0,
+                __bindgen_anon_1: perf_event_attr__bindgen_ty_1 { sample_period: 0 },
+                sample_type: 0,
+                read_format: 0,
+                _bitfield_align_1: [0; 0],
+                _bitfield_1: __BindgenBitfieldUnit::new([0; 8]),
+                __bindgen_anon_2: perf_event_attr__bindgen_ty_2 { wakeup_events: 0 },
+                bp_type: 0,
+                __bindgen_anon_3: perf_event_attr__bindgen_ty_3 { bp_addr: 0 },
+                __bindgen_anon_4: perf_event_attr__bindgen_ty_4 { bp_len: 0 },
+                branch_sample_type: 0,
+                sample_regs_user: 0,
+                sample_stack_user: 0,
+                clockid: 0,
+                sample_regs_intr: 0,
+                aux_watermark: 0,
+                sample_max_stack: 0,
+                __reserved_2: 0,
+                aux_sample_size: 0,
+                __reserved_3: 0,
+                sig_data: 0,
+            },
+        }
+    }
+
+    pub fn type_id(mut self, type_id: TypeId) -> Self {
+        self.attr.type_ = type_id.to_perf_sys();
+        self
+    }
+
+    pub fn type_config<T: TryInto<PerfEventConfigType>>(
+        mut self,
+        config: T,
+    ) -> Result<Self, BuilderError> {
+        self.attr.config = config.try_into().map_err(|_| BuilderError::Unset)?;
+        Ok(self)
+    }
+
+    /// Set the sample period. If the `freq` flag is set, clear the flag
+    /// and overwrite the sample frequency with the sample period.
+    pub fn sample_period(mut self, sample_period: u64) -> Result<Self, BuilderError> {
+        match self.attr.freq() {
+            0 => {
+                self.attr.__bindgen_anon_1.sample_period = sample_period;
+                Ok(self)
+            }
+            1 => {
+                self.attr.set_freq(0);
+                self.attr.__bindgen_anon_1.sample_period = sample_period;
+                Ok(self)
+            }
+            _ => Err(BuilderError::BitImpossible),
+        }
+    }
+
+    /// Sets the sample frequency by first setting the `freq` flag.
+    /// If the sample period has already been set, set the `freq` flag
+    /// and overwrite the sample period with the sample frequency.
+    pub fn sample_freq(mut self, sample_freq: u64) -> Result<Self, BuilderError> {
+        match self.attr.freq() {
+            0 => {
+                self.attr.set_freq(1);
+                self.attr.__bindgen_anon_1.sample_freq = sample_freq;
+                Ok(self)
+            }
+            1 => {
+                self.attr.__bindgen_anon_1.sample_freq = sample_freq;
+                Ok(self)
+            }
+            _ => Err(BuilderError::BitImpossible),
+        }
+    }
+
+    pub fn sample_format(mut self, sample_type: &[SampleFormat]) -> Result<Self, BuilderError> {
+        for t in sample_type {
+            self.attr.sample_type |= t.to_perf_sys()?;
+        }
+        Ok(self)
+    }
+
+    pub fn read_format(mut self, read_format: &[ReadFormat]) -> Result<Self, BuilderError> {
+        for f in read_format {
+            self.attr.read_format |= f.to_perf_sys()?;
+        }
+        Ok(self)
+    }
+
+    pub fn flags(mut self, flags: &[EventAttrFlags]) -> Self {
+        for f in flags {
+            f.set_attr_bitfield(&mut self.attr);
+        }
+        self
+    }
+
+    /// Set to wake up every n events, if the watermark flag is not set, set it
+    /// and overwrite the wakeup bytes watermark.
+    pub fn wakeup_n_events(mut self, n_events: u32) -> Result<Self, BuilderError> {
+        // Watermark flag must be zero.
+        match self.attr.watermark() {
+            0 => {
+                self.attr.__bindgen_anon_2.wakeup_events = n_events;
+                Ok(self)
+            }
+            1 => {
+                self.attr.set_watermark(0);
+                self.attr.__bindgen_anon_2.wakeup_events = n_events;
+                Ok(self)
+            }
+            _ => Err(BuilderError::BitImpossible),
+        }
+    }
+
+    ///
+    pub fn wakeup_n_bytes(mut self, n_bytes: u32) -> Result<Self, BuilderError> {
+        match self.attr.watermark() {
+            0 => {
+                self.attr.set_watermark(1);
+                self.attr.__bindgen_anon_2.wakeup_watermark = n_bytes;
+                Ok(self)
+            }
+            1 => {
+                self.attr.__bindgen_anon_2.wakeup_watermark = n_bytes;
+                Ok(self)
+            }
+            _ => Err(BuilderError::BitImpossible),
+        }
+    }
+
+    fn validate_build(&self) -> Result<(), BuilderError> {
+        // TODO
         Ok(())
     }
+
+    fn build(self) -> Result<perf_event_attr, BuilderError> {
+        self.validate_build()?;
+        Ok(self.attr)
+    }
 }
 
-bitfield! {
-    pub struct EventAttrFlagBits(u64);
-    disabled, set_disabled: 0;
-    inherit, set_inherit: 1;
-    pinned, set_pinned: 2;
-    exclusive, set_exclusive: 3;
-    exclude_user, set_exclude_user: 4;
-    exclude_kernel, set_exclude_kernel: 5;
-    exclude_hv, set_exclude_hv: 6;
-    exclude_idle, set_exclude_idle: 7;
-    mmap, set_mmap: 8;
-    comm, set_comm: 9;
-    freq, set_freq: 10;
-    inherit_stat, set_inherit_stat: 11;
-    enable_on_exec, set_enable_on_exec: 12;
-    task, set_task: 13;
-    watermark, set_watermark: 14;
-    precise_ip, set_precise_ip: 15;
-    precise_ip_skid, set_precise_ip_skid: 16;
-    mmap_data, set_mmap_data: 17;
-    sample_id_all, set_sample_id_all: 18;
-    exclude_host, set_exclude_host: 19;
-    exclude_guest, set_exclude_guest: 20;
-    exclude_callchain_kernel, set_exclude_callchain_kernel: 21;
-    exclude_callchain_user, set_exclude_callchain_user: 22;
-    mmap2, set_mmap2: 23;
-    comm_exec, set_comm_exec: 24;
-    use_clockid, set_use_clockid: 25;
-    context_switch, set_context_switch: 26;
-    write_backward, set_write_backward: 27;
-    namespaces, set_namespaces: 28;
-    ksymbol, set_ksymbol: 29;
-    bpf_event, set_bpf_event: 30;
-    aux_output, set_aux_output: 31;
-    cgroup, set_cgroup: 32;
-    text_poke, set_text_poke: 33;
-    build_id, set_build_id: 34;
-    inherit_thread, set_inherit_thread: 35;
-    remove_on_exec, set_remove_on_exec: 36;
-    sigtrap, set_sigtrap: 37;
+pub enum PerfEventOpenFlags {
+    CloseOnExec,
+    NoGroup,
+    Output,
+    CGroup,
 }
 
-#[repr(C)]
-union SampleTimeConfig {
-    sample_period: u64,
-    sample_freq: u64,
-}
-
-#[repr(C)]
-union Wakepoint {
-    events: u32,    // Wakup every n events
-    watermark: u32, // Wakeup every n bytes
-}
-
-#[repr(C)]
-union Breakpoint {
-    bp_addr: u64,
-    kprobe_func: u64,
-    uprobe_path: u64,
-    config1: u64,
-}
-
-#[repr(C)]
-union BreakpointConfig {
-    bp_len: u64,
-    kprobe_addr: u64,
-    uprobe_offset: u64,
-    config2: u64,
-}
-
-// Ex:
-//   //perf_page[i][READ] = perf_setup(0x1cd, 0x4, i);  // MEM_TRANS_RETIRED.LOAD_LATENCY_GT_4
-//    //perf_page[i][READ] = perf_setup(0x81d0, 0, i);   // MEM_INST_RETIRED.ALL_LOADS
-//    perf_page[i][DRAMREAD] = perf_setup(0x1d3, 0, i, DRAMREAD);      // MEM_LOAD_L3_MISS_RETIRED.LOCAL_DRAM
-//    perf_page[i][NVMREAD] = perf_setup(0x80d1, 0, i, NVMREAD);     // MEM_LOAD_RETIRED.LOCAL_PMM
-//    //perf_page[i][WRITE] = perf_setup(0x82d0, 0, i, WRITE);    // MEM_INST_RETIRED.ALL_STORES
-//    //perf_page[i][WRITE] = perf_setup(0x12d0, 0, i);   // MEM_INST_RETIRED.STLB_MISS_STORES
-pub struct PerfEventAttrBuilder {
-    type_id: TypeId,
-    config: u64,
-    sample_time: SampleTimeConfig,
-    sample_type: u64,
-    read_format: u64,
-    flags: EventAttrFlagBits,
-    wakeup: Wakepoint,
-    bp_type: u32,
-    bp: Breakpoint,
-    bp_config: BreakpointConfig,
-    branch_sample_type: u64,
-    sample_regs_user: u64,  // user regs to dump on samples
-    sample_stack_user: u32, // size of stack to dump on samples
-    clockid: u32,           // clock to use for time fields
-    sample_regs_intr: u64,  // regs to dump on samples
-    aux_watermark: u32,     // aux bytes before wakeup
-    sample_max_stack: u32,  // max frames in callchain
-    aux_sample_size: u32,
-    sig_data: u64, // user data for sigtrap
-}
-
-impl PerfEventAttrBuilder {
-    pub fn new() -> PerfEventAttrBuilder {
-        PerfEventAttrBuilder {
-            type_id: TypeId::_unset,
-            config: 0,
-            sample_time: SampleTimeConfig { sample_period: 0 },
-            sample_type: 0,
-            read_format: 0,
-            flags: EventAttrFlagBits(0),
-            wakeup: Wakepoint { events: 0 },
-            bp_type: 0,
-            bp: Breakpoint { bp_addr: 0 },
-            bp_config: BreakpointConfig { bp_len: 0 },
-            branch_sample_type: 0,
-            sample_regs_user: 0,
-            sample_stack_user: 0,
-            clockid: 0,
-            sample_regs_intr: 0,
-            aux_watermark: 0,
-            sample_max_stack: 0,
-            aux_sample_size: 0,
-            sig_data: 0,
-        }
-    }
-
-    pub fn type_id(&mut self, type_id: TypeId) -> &mut Self {
-        self.type_id = type_id;
-        self
-    }
-
-    pub fn config(&mut self, config: u64) -> &mut Self {
-        self.config = config;
-        self
-    }
-
-    pub fn sample_period(&mut self, sample_period: u64) -> Result<&mut Self, BuilderError> {
-        // SAFETY: Union is already initialized and of same type.
-        match unsafe { self.sample_time.sample_period } {
-            0 => {
-                self.sample_time.sample_period = sample_period;
-                Ok(self)
-            }
-            _ => Err(BuilderError::SamplePeriodAndFreqSet),
-        }
-    }
-
-    pub fn sample_freq(&mut self, sample_freq: u64) -> Result<&mut Self, BuilderError> {
-        // SAFETY: Union is already initialized and of same type.
-        match unsafe { self.sample_time.sample_freq } {
-            0 => {
-                self.sample_time.sample_freq = sample_freq;
-                Ok(self)
-            }
-            _ => Err(BuilderError::SamplePeriodAndFreqSet),
-        }
-    }
-
-    pub fn sample_type(&mut self, sample_type: &[SampleType]) -> Result<&mut Self, BuilderError> {
-        for t in sample_type {
-            self.sample_type |= t.to_perf_sys()?;
-        }
-        Ok(self)
-    }
-
-    pub fn read_format(&mut self, read_format: &[ReadFormat]) -> Result<&mut Self, BuilderError> {
-        for f in read_format {
-            self.read_format |= f.to_perf_sys()?;
-        }
-        Ok(self)
-    }
-
-    pub fn set_flags(&mut self, flags: &[EventAttrFlags]) -> Result<&mut Self, BuilderError> {
-        for f in flags {
-            f.set_bitfield(&mut self.flags)?;
-        }
-        Ok(self)
-    }
-
-    pub fn wakeup_n_events(&mut self, n_events: u32) -> Result<&mut Self, BuilderError> {
-        // SAFETY: Union is already initialized and of same type.
-        match unsafe { self.wakeup.watermark } {
-            0 => {
-                self.wakeup.events = n_events;
-                Ok(self)
-            }
-            _ => Err(BuilderError::WakeupEventsandWatermarkSet),
-        }
-    }
-
-    pub fn wakeup_n_bytes(&mut self, n_bytes: u32) -> Result<&mut Self, BuilderError> {
-        // SAFETY: Union is already initialized and of same type.
-        match unsafe { self.wakeup.events } {
-            0 => {
-                self.wakeup.watermark = n_bytes;
-                Ok(self)
-            }
-            _ => Err(BuilderError::WakeupEventsandWatermarkSet),
-        }
-    }
-
-    pub fn breakpoint_type(&mut self, bp_type: u32) -> &mut Self {
-        self.bp_type = bp_type;
-        self
-    }
-
-    pub fn breakpoint_addr(&mut self, bp_addr: u64) -> Result<&mut Self, BuilderError> {
-        // SAFETY: Union is already initialized and of same type.
-        match unsafe { self.bp.kprobe_func || self.bp.uprobe_path || self.bp.config1 } {
-            0 => {
-                self.bp.bp_addr = bp_addr;
-                Ok(self)
-            }
-            _ => Err(BuilderError::TypeIdUnset),
+impl PerfEventOpenFlags {
+    fn to_open_flags(&self) -> u32 {
+        match self {
+            Self::CloseOnExec => perf_sys::PERF_FLAG_FD_CLOEXEC,
+            Self::NoGroup => perf_sys::PERF_FLAG_FD_NO_GROUP,
+            Self::Output => perf_sys::PERF_FLAG_FD_OUTPUT,
+            Self::CGroup => perf_sys::PERF_FLAG_PID_CGROUP,
         }
     }
 }
+
+/// Wrapper around the `perf_event_open` syscall.
+///
+/// TODO:
+/// - Support event groups
+pub fn perf_event_open(
+    attr: PerfEventBuilder,
+    pid: i32,
+    cpu: i32,
+    flags: Option<&[PerfEventOpenFlags]>,
+) -> Result<PerfEventHandle, EventOpenError> {
+    let attr = attr.build().map_err(|_| EventOpenError::SyscallError)?;
+    let flags = match flags {
+        Some(flags) => flags.into_iter().fold(0, |acc, f| acc | f.to_open_flags()),
+        None => 0,
+    };
+    // SAFETY: SYS_perf_event_open syscall arguments are correct and return value is checked.
+    let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, pid, cpu, -1, flags) };
+    if fd < 0 {
+        return Err(EventOpenError::SyscallError);
+    }
+
+    Ok(PerfEventHandle(fd))
+}
+
+pub struct PerfEventHandle(FdType);
