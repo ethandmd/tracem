@@ -61,9 +61,9 @@ bitfield! {
     result_id, set_result_id: 4, 2;
 }
 
-impl Into<PerfEventConfigType> for PerfHwCacheConfig {
-    fn into(self) -> PerfEventConfigType {
-        self.0
+impl From<PerfHwCacheConfig> for PerfEventConfigType {
+    fn from(val: PerfHwCacheConfig) -> PerfEventConfigType {
+        val.0
     }
 }
 
@@ -73,24 +73,24 @@ pub enum PerfHwCacheId {
     LL,
     DTLB,
     ITLB,
-    BPU,
+    Bpu,
     Node,
     Max,
     _unset,
 }
 
-impl Into<u64> for PerfHwCacheId {
-    fn into(self) -> u64 {
-        match self {
-            Self::L1D => 0,
-            Self::L1I => 1,
-            Self::LL => 2,
-            Self::DTLB => 3,
-            Self::ITLB => 4,
-            Self::BPU => 5,
-            Self::Node => 6,
-            Self::Max => 7,
-            Self::_unset => 8,
+impl From<PerfHwCacheId> for u64 {
+    fn from(val: PerfHwCacheId) -> u64 {
+        match val {
+            PerfHwCacheId::L1D => 0,
+            PerfHwCacheId::L1I => 1,
+            PerfHwCacheId::LL => 2,
+            PerfHwCacheId::DTLB => 3,
+            PerfHwCacheId::ITLB => 4,
+            PerfHwCacheId::Bpu => 5,
+            PerfHwCacheId::Node => 6,
+            PerfHwCacheId::Max => 7,
+            PerfHwCacheId::_unset => 8,
         }
     }
 }
@@ -103,14 +103,14 @@ pub enum PerfHwCacheOpId {
     _unset,
 }
 
-impl Into<u64> for PerfHwCacheOpId {
-    fn into(self) -> u64 {
-        match self {
-            Self::Read => 0,
-            Self::Write => 1,
-            Self::Prefetch => 2,
-            Self::Max => 3,
-            Self::_unset => 4,
+impl From<PerfHwCacheOpId> for u64 {
+    fn from(val: PerfHwCacheOpId) -> u64 {
+        match val {
+            PerfHwCacheOpId::Read => 0,
+            PerfHwCacheOpId::Write => 1,
+            PerfHwCacheOpId::Prefetch => 2,
+            PerfHwCacheOpId::Max => 3,
+            PerfHwCacheOpId::_unset => 4,
         }
     }
 }
@@ -122,13 +122,13 @@ pub enum PerfHwCacheOpResultId {
     _unset,
 }
 
-impl Into<u64> for PerfHwCacheOpResultId {
-    fn into(self) -> u64 {
-        match self {
-            Self::Access => 0,
-            Self::Miss => 1,
-            Self::Max => 2,
-            Self::_unset => 3,
+impl From<PerfHwCacheOpResultId> for u64 {
+    fn from(val: PerfHwCacheOpResultId) -> u64 {
+        match val {
+            PerfHwCacheOpResultId::Access => 0,
+            PerfHwCacheOpResultId::Miss => 1,
+            PerfHwCacheOpResultId::Max => 2,
+            PerfHwCacheOpResultId::_unset => 3,
         }
     }
 }
@@ -205,14 +205,14 @@ impl TryInto<PerfEventConfigType> for PerfHwCacheConfigBuilder {
 
 /// Set in the sample_type field of the perf_event_attr struct.
 pub enum SampleFormat {
-    IP,
-    TID,
+    Ip,
+    Tid,
     Time,
     Addr,
     Read,
     Callchain,
     ID,
-    CPU,
+    Cpu,
     Period,
     StreamID,
     Raw,
@@ -237,14 +237,14 @@ pub enum SampleFormat {
 impl SampleFormat {
     fn to_perf_sys(&self) -> Result<u64, BuilderError> {
         match self {
-            Self::IP => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_IP),
-            Self::TID => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_TID),
+            Self::Ip => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_IP),
+            Self::Tid => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_TID),
             Self::Time => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_TIME),
             Self::Addr => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_ADDR),
             Self::Read => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_READ),
             Self::Callchain => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_CALLCHAIN),
             Self::ID => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_ID),
-            Self::CPU => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_CPU),
+            Self::Cpu => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_CPU),
             Self::Period => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_PERIOD),
             Self::StreamID => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_STREAM_ID),
             Self::Raw => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_RAW),
@@ -316,7 +316,7 @@ pub enum EventAttrFlags {
     PreciseIpAnySkid,
     PreciseIpConstantSkid,
     PreciseIpPleaseNoSkid,
-    PreciseIPNoSkid,
+    PreciseIpNoSkid,
     MMapData,
     SampleIDAll,
     ExcludeHost,
@@ -361,7 +361,7 @@ impl EventAttrFlags {
             Self::PreciseIpAnySkid => attr.set_precise_ip(0),
             Self::PreciseIpConstantSkid => attr.set_precise_ip(1),
             Self::PreciseIpPleaseNoSkid => attr.set_precise_ip(2),
-            Self::PreciseIPNoSkid => attr.set_precise_ip(3),
+            Self::PreciseIpNoSkid => attr.set_precise_ip(3),
             Self::MMapData => attr.set_mmap_data(1),
             Self::SampleIDAll => attr.set_sample_id_all(1),
             Self::ExcludeHost => attr.set_exclude_host(1),
@@ -566,7 +566,7 @@ pub fn perf_event_open(
 ) -> Result<PerfEventHandle, EventOpenError> {
     let attr = attr.build().map_err(|_| EventOpenError::SyscallError)?;
     let flags = match flags {
-        Some(flags) => flags.into_iter().fold(0, |acc, f| acc | f.to_open_flags()),
+        Some(flags) => flags.iter().fold(0, |acc, f| acc | f.to_open_flags()),
         None => 0,
     };
     // SAFETY: SYS_perf_event_open syscall arguments are correct and return value is checked.

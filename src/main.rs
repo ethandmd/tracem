@@ -22,8 +22,8 @@ fn build_l3_cache_miss() -> Result<PerfEventHandle, perf::EventOpenError> {
         .sample_period(SAMPLE_PERIOD)
         .unwrap()
         .sample_format(&[
-            SampleFormat::IP,
-            SampleFormat::TID,
+            SampleFormat::Ip,
+            SampleFormat::Tid,
             SampleFormat::Time,
             SampleFormat::Addr,
             SampleFormat::Weight,
