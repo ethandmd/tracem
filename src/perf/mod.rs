@@ -699,6 +699,11 @@ impl PerfMmapBuf {
         unsafe { (*self.0).version }
     }
 
+    pub fn data_size(&self) -> u64 {
+        // SAFETY: Mmap buffer is valid and contains the data_size field.
+        unsafe { (*self.0).data_size }
+    }
+
     fn data_ptr(&self) -> *mut u8 {
         // SAFETY: Mmap buffer is valid and contains the data_offset field.
         unsafe { self.0.byte_add((*self.0).data_offset as usize).cast() }

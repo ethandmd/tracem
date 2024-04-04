@@ -9,7 +9,7 @@ use perf::*;
 mod perf;
 
 const SAMPLE_PERIOD: u64 = 10000;
-const MMAP_SIZE: usize = 1 + (1 << 16); // 1Mib (must be power of 2) + 1
+const MMAP_SIZE: usize = 1 + (1 << 16) * 4096; // 1Mib (must be power of 2) + 1
 
 #[derive(Default)]
 struct l3_miss_record {
@@ -21,8 +21,8 @@ struct l3_miss_record {
 }
 
 fn build_l3_cache_miss() -> Result<PerfEventHandle, perf::BuilderError> {
-    let pid = 0;
-    let cpu = -1;
+    let pid = -1;
+    let cpu = 0;
     PerfEventBuilder::new()
         .type_id(TypeId::HardwareCache)
         .type_config(
@@ -54,11 +54,15 @@ fn build_l3_cache_miss() -> Result<PerfEventHandle, perf::BuilderError> {
 }
 
 fn main() {
+    debug!("Page Size: {}", unsafe {
+        libc::sysconf(libc::_SC_PAGE_SIZE)
+    });
     env_logger::init();
     let event = build_l3_cache_miss().unwrap();
     event.enable().unwrap();
     let buf = event.mmap_buffer(MMAP_SIZE).unwrap();
     debug!("Perf mmap version: {}", buf.version());
+    debug!("Perf mmap data size: 0x{:x}", buf.data_size());
     let mut record = l3_miss_record::default();
     for _ in 0..10 {
         let _ = unsafe { buf.read_sample(&mut record) };
