@@ -1,26 +1,68 @@
-use bitfield::bitfield;
+use std::{mem::size_of, ptr::copy_nonoverlapping};
+
+use log::{debug, error, info};
 
 use self::perf_sys::{
     __BindgenBitfieldUnit, perf_event_attr, perf_event_attr__bindgen_ty_1,
     perf_event_attr__bindgen_ty_2, perf_event_attr__bindgen_ty_3, perf_event_attr__bindgen_ty_4,
+    perf_event_mmap_page,
 };
+
+pub use perf_sys::perf_event_header;
+
+impl Default for perf_event_header {
+    fn default() -> Self {
+        perf_event_header {
+            size: 0,
+            misc: 0,
+            type_: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod test;
 
 mod perf_sys {
     include!(concat!(env!("OUT_DIR"), "/perf-sys.rs"));
 }
 
+#[cfg(feature = "libpfm")]
+mod libpfm_sys {
+    include!(concat!(env!("OUT_DIR"), "/libpfm-sys.rs"));
+}
+
+#[cfg(feature = "libpfm")]
+mod libpfm;
+
 type PerfEventConfigType = u64;
-type FdType = i64;
+type FdType = i32; // libc::c_long;
 
 #[derive(Debug)]
 pub enum BuilderError {
     Unset,
     BitImpossible,
+    BreakpointWrongConfig,
+    BuildError,
+    LibPfmInit,
+    LibPfmProbe,
+}
+
+#[derive(Debug)]
+pub enum LibPfmError {
+    Invalid,
+    NoPmu,
+    NotSupported,
+    PfmGetPMUError,
+    Unknown,
 }
 
 #[derive(Debug)]
 pub enum EventOpenError {
     SyscallError,
+    MmapFailed,
+    MmapInvalidSize,
+    SampleBufSize,
 }
 
 /// Set in the type field of the perf_event_attr struct.
@@ -31,7 +73,6 @@ pub enum TypeId {
     HardwareCache,
     Raw,
     Breakpoint,
-    Max,
 }
 
 impl TypeId {
@@ -43,54 +84,41 @@ impl TypeId {
             TypeId::HardwareCache => perf_sys::perf_type_id_PERF_TYPE_HW_CACHE,
             TypeId::Raw => perf_sys::perf_type_id_PERF_TYPE_RAW,
             TypeId::Breakpoint => perf_sys::perf_type_id_PERF_TYPE_BREAKPOINT,
-            TypeId::Max => perf_sys::perf_type_id_PERF_TYPE_MAX,
         }
     }
 }
 
-// From <linux/perf_event.h>
-// PERF_TYPE_HW_CACHE:          0xEEEEEEEE00DDCCBB
-//                   BB: hardware cache ID
-//                   CC: hardware cache op ID
-//                   DD: hardware cache op result ID
-//                   EEEEEEEE: PMU type ID
-bitfield! {
-    struct PerfHwCacheConfig(u64);
-    cache_id, set_cache_id: 0, 2;
-    op_id, set_op_id: 2, 2;
-    result_id, set_result_id: 4, 2;
-}
+// If type is PERF_TYPE_HW_CACHE, then we are measuring a
+// hardware CPU cache event.  To calculate the appropriate
+// config value, use the following equation:
 
-impl From<PerfHwCacheConfig> for PerfEventConfigType {
-    fn from(val: PerfHwCacheConfig) -> PerfEventConfigType {
-        val.0
-    }
-}
-
+// config = (perf_hw_cache_id) |
+//          (perf_hw_cache_op_id << 8) |
+//          (perf_hw_cache_op_result_id << 16);
+//
+// TODO: Impl From/Into trait instead of to_perf_sys().
 pub enum PerfHwCacheId {
     L1D,
     L1I,
     LL,
-    DTLB,
-    ITLB,
+    Dtlb,
+    Itlb,
     Bpu,
     Node,
-    Max,
     _unset,
 }
 
-impl From<PerfHwCacheId> for u64 {
-    fn from(val: PerfHwCacheId) -> u64 {
-        match val {
-            PerfHwCacheId::L1D => 0,
-            PerfHwCacheId::L1I => 1,
-            PerfHwCacheId::LL => 2,
-            PerfHwCacheId::DTLB => 3,
-            PerfHwCacheId::ITLB => 4,
-            PerfHwCacheId::Bpu => 5,
-            PerfHwCacheId::Node => 6,
-            PerfHwCacheId::Max => 7,
-            PerfHwCacheId::_unset => 8,
+impl PerfHwCacheId {
+    fn to_perf_sys(&self) -> Result<u32, BuilderError> {
+        match self {
+            PerfHwCacheId::L1D => Ok(perf_sys::perf_hw_cache_id_PERF_COUNT_HW_CACHE_L1D),
+            PerfHwCacheId::L1I => Ok(perf_sys::perf_hw_cache_id_PERF_COUNT_HW_CACHE_L1I),
+            PerfHwCacheId::LL => Ok(perf_sys::perf_hw_cache_id_PERF_COUNT_HW_CACHE_LL),
+            PerfHwCacheId::Dtlb => Ok(perf_sys::perf_hw_cache_id_PERF_COUNT_HW_CACHE_DTLB),
+            PerfHwCacheId::Itlb => Ok(perf_sys::perf_hw_cache_id_PERF_COUNT_HW_CACHE_ITLB),
+            PerfHwCacheId::Bpu => Ok(perf_sys::perf_hw_cache_id_PERF_COUNT_HW_CACHE_BPU),
+            PerfHwCacheId::Node => Ok(perf_sys::perf_hw_cache_id_PERF_COUNT_HW_CACHE_NODE),
+            PerfHwCacheId::_unset => Err(BuilderError::Unset),
         }
     }
 }
@@ -99,18 +127,20 @@ pub enum PerfHwCacheOpId {
     Read,
     Write,
     Prefetch,
-    Max,
     _unset,
 }
 
-impl From<PerfHwCacheOpId> for u64 {
-    fn from(val: PerfHwCacheOpId) -> u64 {
-        match val {
-            PerfHwCacheOpId::Read => 0,
-            PerfHwCacheOpId::Write => 1,
-            PerfHwCacheOpId::Prefetch => 2,
-            PerfHwCacheOpId::Max => 3,
-            PerfHwCacheOpId::_unset => 4,
+impl PerfHwCacheOpId {
+    fn to_perf_sys(&self) -> Result<u32, BuilderError> {
+        match self {
+            PerfHwCacheOpId::Read => Ok(perf_sys::perf_hw_cache_op_id_PERF_COUNT_HW_CACHE_OP_READ),
+            PerfHwCacheOpId::Write => {
+                Ok(perf_sys::perf_hw_cache_op_id_PERF_COUNT_HW_CACHE_OP_WRITE)
+            }
+            PerfHwCacheOpId::Prefetch => {
+                Ok(perf_sys::perf_hw_cache_op_id_PERF_COUNT_HW_CACHE_OP_PREFETCH)
+            }
+            PerfHwCacheOpId::_unset => Err(BuilderError::Unset),
         }
     }
 }
@@ -118,17 +148,19 @@ impl From<PerfHwCacheOpId> for u64 {
 pub enum PerfHwCacheOpResultId {
     Access,
     Miss,
-    Max,
     _unset,
 }
 
-impl From<PerfHwCacheOpResultId> for u64 {
-    fn from(val: PerfHwCacheOpResultId) -> u64 {
-        match val {
-            PerfHwCacheOpResultId::Access => 0,
-            PerfHwCacheOpResultId::Miss => 1,
-            PerfHwCacheOpResultId::Max => 2,
-            PerfHwCacheOpResultId::_unset => 3,
+impl PerfHwCacheOpResultId {
+    fn to_perf_sys(&self) -> Result<u32, BuilderError> {
+        match self {
+            PerfHwCacheOpResultId::Access => {
+                Ok(perf_sys::perf_hw_cache_op_result_id_PERF_COUNT_HW_CACHE_RESULT_ACCESS)
+            }
+            PerfHwCacheOpResultId::Miss => {
+                Ok(perf_sys::perf_hw_cache_op_result_id_PERF_COUNT_HW_CACHE_RESULT_MISS)
+            }
+            PerfHwCacheOpResultId::_unset => Err(BuilderError::Unset),
         }
     }
 }
@@ -176,22 +208,11 @@ impl PerfHwCacheConfigBuilder {
         self
     }
 
-    fn build(self) -> Result<PerfHwCacheConfig, BuilderError> {
-        if let PerfHwCacheId::_unset = self.hw_cache_id {
-            return Err(BuilderError::Unset);
-        }
-        if let PerfHwCacheOpId::_unset = self.op_id {
-            return Err(BuilderError::Unset);
-        }
-        if let PerfHwCacheOpResultId::_unset = self.result_id {
-            return Err(BuilderError::Unset);
-        }
-
-        let mut config = PerfHwCacheConfig(0);
-        config.set_cache_id(self.hw_cache_id.into());
-        config.set_op_id(self.op_id.into());
-        config.set_result_id(self.result_id.into());
-        Ok(config)
+    fn build(self) -> Result<PerfEventConfigType, BuilderError> {
+        let config = self.hw_cache_id.to_perf_sys()?
+            | self.op_id.to_perf_sys()? << 8
+            | self.result_id.to_perf_sys()? << 16;
+        Ok(config as PerfEventConfigType)
     }
 }
 
@@ -199,7 +220,7 @@ impl TryInto<PerfEventConfigType> for PerfHwCacheConfigBuilder {
     type Error = BuilderError;
 
     fn try_into(self) -> Result<PerfEventConfigType, Self::Error> {
-        self.build().map(|config| config.into())
+        self.build()
     }
 }
 
@@ -230,7 +251,6 @@ pub enum SampleFormat {
     DataPageSize,
     CodePageSize,
     WeightStruct,
-    Max,
     _unset,
 }
 
@@ -262,20 +282,17 @@ impl SampleFormat {
             Self::DataPageSize => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_DATA_PAGE_SIZE),
             Self::CodePageSize => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_CODE_PAGE_SIZE),
             Self::WeightStruct => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_WEIGHT_STRUCT),
-            Self::Max => Ok(perf_sys::perf_event_sample_format_PERF_SAMPLE_MAX),
             Self::_unset => Err(BuilderError::Unset),
         }
     }
 }
 
-/// Set this enum in the read_format field of the perf_event_attr struct.
 pub enum ReadFormat {
     TotalTimeEnabled,
     TotalTimeRunning,
     ID,
     Group,
     Lost,
-    Max,
     _unset,
 }
 
@@ -291,7 +308,6 @@ impl ReadFormat {
             Self::ID => Ok(perf_sys::perf_event_read_format_PERF_FORMAT_ID as u64),
             Self::Group => Ok(perf_sys::perf_event_read_format_PERF_FORMAT_GROUP as u64),
             Self::Lost => Ok(perf_sys::perf_event_read_format_PERF_FORMAT_LOST as u64),
-            Self::Max => Ok(perf_sys::perf_event_read_format_PERF_FORMAT_MAX as u64),
             Self::_unset => Err(BuilderError::Unset),
         }
     }
@@ -393,6 +409,28 @@ pub struct PerfEventBuilder {
 
 impl PerfEventBuilder {
     pub fn new() -> PerfEventBuilder {
+        #[cfg(feature = "libpfm")]
+        {
+            info!("Initializing libpfm...");
+            match unsafe { libpfm_sys::pfm_initialize() } {
+                0 => {
+                    info!("libpfm initialized successfully.");
+                    match libpfm::debug_read_pmus_info() {
+                        Ok(info) => {
+                            debug!("Found PMUs: {}", info);
+                        }
+                        Err(e) => {
+                            error!("Failed to read PMU info: {:?}", e);
+                            error!("Continuing without libpfm support.");
+                        }
+                    }
+                }
+                _ => {
+                    error!("Failed to initialize libpfm.");
+                    error!("Continuing without libpfm support.");
+                }
+            }
+        }
         PerfEventBuilder {
             attr: perf_event_attr {
                 type_: 0,
@@ -431,7 +469,10 @@ impl PerfEventBuilder {
         mut self,
         config: T,
     ) -> Result<Self, BuilderError> {
-        self.attr.config = config.try_into().map_err(|_| BuilderError::Unset)?;
+        self.attr.config = config.try_into().map_err(|_| {
+            error!("Failed to convert config to PerfEventConfigType.");
+            BuilderError::Unset
+        })?;
         Ok(self)
     }
 
@@ -526,13 +567,21 @@ impl PerfEventBuilder {
     }
 
     fn validate_build(&self) -> Result<(), BuilderError> {
-        // TODO
+        // TODO: Add more validation checks.
+        if self.attr.type_ == TypeId::Breakpoint.to_perf_sys() && self.attr.config != 0 {
+            return Err(BuilderError::BreakpointWrongConfig);
+        }
         Ok(())
     }
 
-    fn build(self) -> Result<perf_event_attr, BuilderError> {
+    pub fn build(
+        self,
+        pid: i32,
+        cpu: i32,
+        flags: Option<&[PerfEventOpenFlags]>,
+    ) -> Result<PerfEventHandle, BuilderError> {
         self.validate_build()?;
-        Ok(self.attr)
+        perf_event_open(self.attr, pid, cpu, flags).map_err(|_| BuilderError::BuildError)
     }
 }
 
@@ -554,24 +603,30 @@ impl PerfEventOpenFlags {
     }
 }
 
-/// Wrapper around the `perf_event_open` syscall.
-///
-/// TODO:
-/// - Support event groups
-pub fn perf_event_open(
-    attr: PerfEventBuilder,
+// Wrapper around the `perf_event_open` syscall.
+//
+// TODO:
+// - Support event groups
+fn perf_event_open(
+    attr: perf_event_attr,
     pid: i32,
     cpu: i32,
     flags: Option<&[PerfEventOpenFlags]>,
 ) -> Result<PerfEventHandle, EventOpenError> {
-    let attr = attr.build().map_err(|_| EventOpenError::SyscallError)?;
+    let group = -1;
     let flags = match flags {
         Some(flags) => flags.iter().fold(0, |acc, f| acc | f.to_open_flags()),
         None => 0,
     };
+    debug!(
+        "Opening perf event on pid: {}, cpu: {}, with flags: {}",
+        pid, cpu, flags
+    );
     // SAFETY: SYS_perf_event_open syscall arguments are correct and return value is checked.
-    let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, pid, cpu, -1, flags) };
+    let fd =
+        unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, pid, cpu, group, flags) as i32 };
     if fd < 0 {
+        debug!("Consider setting the `perf_event_paranoid` sysctl or granting CAP_SYS_PTRACE capabality.");
         return Err(EventOpenError::SyscallError);
     }
 
@@ -579,3 +634,114 @@ pub fn perf_event_open(
 }
 
 pub struct PerfEventHandle(FdType);
+
+impl PerfEventHandle {
+    pub fn enable(&self) -> Result<(), EventOpenError> {
+        // SAFETY: Struct owns the fd and it is safe to enable it with valid ioctl.
+        match unsafe { libc::ioctl(self.0, perf_sys::perf_ioc_ENABLE as u64) } {
+            0 => {
+                debug!("Enabled perf event.");
+                Ok(())
+            }
+            _ => {
+                error!("Failed to enable perf event.");
+                Err(EventOpenError::SyscallError)
+            }
+        }
+    }
+    pub fn mmap_buffer(&self, mmap_size: usize) -> Result<PerfMmapBuf, EventOpenError> {
+        // mmap size must be 1 + 2^n pages. First page is header page.
+        if !(mmap_size - 1).is_power_of_two() {
+            return Err(EventOpenError::MmapInvalidSize);
+        }
+        // SAFETY: Valid perf event fd owned by struct.
+        let mmap = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                mmap_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                self.0,
+                0,
+            )
+        };
+        if mmap == libc::MAP_FAILED {
+            return Err(EventOpenError::MmapFailed);
+        }
+        info!("Mapped perf event buffer at {:p}", mmap);
+        // SAFETY: mmap ptr is valid at this point. And ownership is transferred to the mmap buffer.
+        let mmpage: *mut perf_event_mmap_page = mmap.cast();
+        Ok(PerfMmapBuf(mmpage))
+    }
+}
+
+impl Drop for PerfEventHandle {
+    fn drop(&mut self) {
+        // SAFETY: Struct owns the fd and it is safe to close it with valid ioctl.
+        unsafe {
+            libc::ioctl(self.0, perf_sys::perf_ioc_DISABLE as u64);
+        }
+    }
+}
+
+// data_head continuously increases; manually wrap by size of mmap_buffer.
+// data_tail should be written to, to reflect last read data (if PROT_WRITE).
+// data_offset is where in the mmap buf the perf sample data begins.
+// data_size is the size of the perf sample data region within mmap buf.
+//
+// Data offset should start at 1st page, after hdr page. The remaining 2^n
+// are the ring buffer.
+pub struct PerfMmapBuf(*mut perf_event_mmap_page);
+
+impl PerfMmapBuf {
+    pub fn version(&self) -> u32 {
+        // SAFETY: Mmap buffer is valid and contains the version field.
+        unsafe { (*self.0).version }
+    }
+
+    fn data_ptr(&self) -> *mut u8 {
+        // SAFETY: Mmap buffer is valid and contains the data_offset field.
+        unsafe { self.0.byte_add((*self.0).data_offset as usize).cast() }
+    }
+
+    fn wrapped_data_tail(&self) -> u64 {
+        // SAFETY: Mmap buffer is valid and modding out by data size
+        // (power of 2) keeps us within the mmap buffer.
+        unsafe { (*self.0).data_tail & ((*self.0).data_size - 1) }
+    }
+
+    fn next_sample(&self) -> *mut perf_event_header {
+        // SAFETY: Mmap buffer is valid and contains the data_offset field.
+        unsafe {
+            self.data_ptr()
+                .add(self.wrapped_data_tail() as usize)
+                .cast()
+        }
+    }
+
+    /// SAFETY: Caller must ensure that T has size for perf header + sample.
+    /// 1. src is valid for reads size_of::<T>() bytes based on size checks.
+    /// 2. dst is valid for writes size_of::<T>() bytes based on size checks.
+    /// 3. src is aligned by perf in mmap buffer, dst is aligned by caller.
+    /// 4. Caller must ensure the memory regions do not overlap.
+    // Should T be Copy as well?
+    pub unsafe fn read_sample<T: Sized>(&self, sample: &mut T) -> Result<(), EventOpenError> {
+        let next_sample = self.next_sample();
+        let size = size_of::<T>() as u16;
+        // SAFETY: next_sample is a valid pointer within the mmap buffer.
+        let next_size = (*next_sample).size;
+        if next_size < size {
+            debug!(
+                "Sample recv is bigger ({}B) than next perf sample ({}B).",
+                size, next_size
+            );
+            return Err(EventOpenError::SampleBufSize);
+        }
+
+        // Equivalent of memcpy
+        copy_nonoverlapping(next_sample.cast(), sample as *mut T, size as usize);
+        // Update data tail to reflect read sample.
+        (*self.0).data_tail += next_size as u64;
+        Ok(())
+    }
+}
