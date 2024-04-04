@@ -407,6 +407,61 @@ pub struct PerfEventBuilder {
     attr: perf_event_attr,
 }
 
+impl Default for PerfEventBuilder {
+    fn default() -> PerfEventBuilder {
+        #[cfg(feature = "libpfm")]
+        {
+            info!("Initializing libpfm...");
+            match unsafe { libpfm_sys::pfm_initialize() } {
+                0 => {
+                    info!("libpfm initialized successfully.");
+                    match libpfm::debug_read_pmus_info() {
+                        Ok(info) => {
+                            debug!("Found PMUs: {}", info);
+                        }
+                        Err(e) => {
+                            error!("Failed to read PMU info: {:?}", e);
+                            error!("Continuing without libpfm support.");
+                        }
+                    }
+                }
+                _ => {
+                    error!("Failed to initialize libpfm.");
+                    error!("Continuing without libpfm support.");
+                }
+            }
+        }
+        let mut attr = perf_event_attr {
+            type_: 0,
+            size: std::mem::size_of::<perf_event_attr>() as u32,
+            config: 0,
+            __bindgen_anon_1: perf_event_attr__bindgen_ty_1 { sample_period: 0 },
+            sample_type: 0,
+            read_format: 0,
+            _bitfield_align_1: [0; 0],
+            _bitfield_1: __BindgenBitfieldUnit::new([0; 8]),
+            __bindgen_anon_2: perf_event_attr__bindgen_ty_2 { wakeup_events: 0 },
+            bp_type: 0,
+            __bindgen_anon_3: perf_event_attr__bindgen_ty_3 { bp_addr: 0 },
+            __bindgen_anon_4: perf_event_attr__bindgen_ty_4 { bp_len: 0 },
+            branch_sample_type: 0,
+            sample_regs_user: 0,
+            sample_stack_user: 0,
+            clockid: 0,
+            sample_regs_intr: 0,
+            aux_watermark: 0,
+            sample_max_stack: 0,
+            __reserved_2: 0,
+            aux_sample_size: 0,
+            __reserved_3: 0,
+            sig_data: 0,
+        };
+
+        attr.set_disabled(1);
+
+        PerfEventBuilder { attr }
+    }
+}
 impl PerfEventBuilder {
     pub fn new() -> PerfEventBuilder {
         #[cfg(feature = "libpfm")]
