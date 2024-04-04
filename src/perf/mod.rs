@@ -1,12 +1,11 @@
-use std::{mem::size_of, ptr::copy_nonoverlapping};
+use std::{
+    mem::{size_of, zeroed},
+    ptr::copy_nonoverlapping,
+};
 
 use log::{debug, error, info};
 
-use self::perf_sys::{
-    __BindgenBitfieldUnit, perf_event_attr, perf_event_attr__bindgen_ty_1,
-    perf_event_attr__bindgen_ty_2, perf_event_attr__bindgen_ty_3, perf_event_attr__bindgen_ty_4,
-    perf_event_mmap_page,
-};
+use self::perf_sys::{perf_event_attr, perf_event_mmap_page, perf_hw_id_PERF_COUNT_HW_CPU_CYCLES};
 
 pub use perf_sys::perf_event_header;
 
@@ -224,6 +223,23 @@ impl TryInto<PerfEventConfigType> for PerfHwCacheConfigBuilder {
     }
 }
 
+pub struct PerfHwConfigBuilder(u64);
+
+impl PerfHwConfigBuilder {
+    pub fn hw_cpu_cycles() -> PerfHwConfigBuilder {
+        Self {
+            0: perf_hw_id_PERF_COUNT_HW_CPU_CYCLES as u64,
+        }
+    }
+}
+
+impl TryInto<PerfEventConfigType> for PerfHwConfigBuilder {
+    type Error = BuilderError;
+
+    fn try_into(self) -> Result<PerfEventConfigType, Self::Error> {
+        Ok(self.0)
+    }
+}
 /// Set in the sample_type field of the perf_event_attr struct.
 pub enum SampleFormat {
     Ip,
@@ -431,90 +447,13 @@ impl Default for PerfEventBuilder {
                 }
             }
         }
-        let mut attr = perf_event_attr {
-            type_: 0,
-            size: std::mem::size_of::<perf_event_attr>() as u32,
-            config: 0,
-            __bindgen_anon_1: perf_event_attr__bindgen_ty_1 { sample_period: 0 },
-            sample_type: 0,
-            read_format: 0,
-            _bitfield_align_1: [0; 0],
-            _bitfield_1: __BindgenBitfieldUnit::new([0; 8]),
-            __bindgen_anon_2: perf_event_attr__bindgen_ty_2 { wakeup_events: 0 },
-            bp_type: 0,
-            __bindgen_anon_3: perf_event_attr__bindgen_ty_3 { bp_addr: 0 },
-            __bindgen_anon_4: perf_event_attr__bindgen_ty_4 { bp_len: 0 },
-            branch_sample_type: 0,
-            sample_regs_user: 0,
-            sample_stack_user: 0,
-            clockid: 0,
-            sample_regs_intr: 0,
-            aux_watermark: 0,
-            sample_max_stack: 0,
-            __reserved_2: 0,
-            aux_sample_size: 0,
-            __reserved_3: 0,
-            sig_data: 0,
-        };
-
-        attr.set_disabled(1);
+        let mut attr = unsafe { zeroed::<perf_event_attr>() };
+        attr.size = std::mem::size_of::<perf_event_attr>() as u32;
 
         PerfEventBuilder { attr }
     }
 }
 impl PerfEventBuilder {
-    pub fn new() -> PerfEventBuilder {
-        #[cfg(feature = "libpfm")]
-        {
-            info!("Initializing libpfm...");
-            match unsafe { libpfm_sys::pfm_initialize() } {
-                0 => {
-                    info!("libpfm initialized successfully.");
-                    match libpfm::debug_read_pmus_info() {
-                        Ok(info) => {
-                            debug!("Found PMUs: {}", info);
-                        }
-                        Err(e) => {
-                            error!("Failed to read PMU info: {:?}", e);
-                            error!("Continuing without libpfm support.");
-                        }
-                    }
-                }
-                _ => {
-                    error!("Failed to initialize libpfm.");
-                    error!("Continuing without libpfm support.");
-                }
-            }
-        }
-        PerfEventBuilder {
-            attr: perf_event_attr {
-                type_: 0,
-                size: std::mem::size_of::<perf_event_attr>() as u32,
-                config: 0,
-                __bindgen_anon_1: perf_event_attr__bindgen_ty_1 { sample_period: 0 },
-                sample_type: 0,
-                read_format: 0,
-                _bitfield_align_1: [0; 0],
-                _bitfield_1: __BindgenBitfieldUnit::new([0; 8]),
-                __bindgen_anon_2: perf_event_attr__bindgen_ty_2 { wakeup_events: 0 },
-                bp_type: 0,
-                __bindgen_anon_3: perf_event_attr__bindgen_ty_3 { bp_addr: 0 },
-                __bindgen_anon_4: perf_event_attr__bindgen_ty_4 { bp_len: 0 },
-                branch_sample_type: 0,
-                sample_regs_user: 0,
-                sample_stack_user: 0,
-                clockid: 0,
-                sample_regs_intr: 0,
-                aux_watermark: 0,
-                sample_max_stack: 0,
-                __reserved_2: 0,
-                aux_sample_size: 0,
-                __reserved_3: 0,
-                sig_data: 0,
-            },
-        }
-    }
-
     pub fn type_id(mut self, type_id: TypeId) -> Self {
         self.attr.type_ = type_id.to_perf_sys();
         self
@@ -680,10 +619,61 @@ fn perf_event_open(
     // SAFETY: SYS_perf_event_open syscall arguments are correct and return value is checked.
     let fd =
         unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, pid, cpu, group, flags) as i32 };
-    if fd < 0 {
-        debug!("Consider setting the `perf_event_paranoid` sysctl or granting CAP_SYS_PTRACE capabality.");
-        return Err(EventOpenError::SyscallError);
-    }
+    match fd {
+        libc::E2BIG => {
+            error!("Too many events or attributes specified.");
+            return Err(EventOpenError::SyscallError);
+        }
+        libc::EACCES => {
+            error!("Permission denied.");
+            return Err(EventOpenError::SyscallError);
+        }
+        libc::EBADF => {
+            error!("Invalid group file descriptor.");
+            return Err(EventOpenError::SyscallError);
+        }
+        libc::EBUSY => {
+            error!("PMU exclusive access already taken.");
+            return Err(EventOpenError::SyscallError);
+        }
+        libc::EFAULT => {
+            error!("Invalid attribute pointer.");
+            return Err(EventOpenError::SyscallError);
+        }
+        libc::EINTR => {
+            error!("Mix perf and ftrace handling for a uprobe.");
+            return Err(EventOpenError::SyscallError);
+        }
+        libc::EINVAL => {
+            error!("Invalid event argument. Consider if sample_freq > max, sample_type out of range,...");
+            return Err(EventOpenError::SyscallError);
+        }
+        libc::EMFILE => {
+            error!("Too many open file descriptors.");
+            return Err(EventOpenError::SyscallError);
+        }
+        libc::ENODEV => {
+            error!("Feature not supported on PMU.");
+            return Err(EventOpenError::SyscallError);
+        }
+        libc::ENOENT => {
+            error!("type_ setting is not valid.");
+            return Err(EventOpenError::SyscallError);
+        }
+        libc::ENOSYS => {
+            error!("Sample stack user set in sample_type and is not supported on hw.");
+            return Err(EventOpenError::SyscallError);
+        }
+        libc::ENOTSUP => {
+            error!("Requested feature is not supported.");
+            return Err(EventOpenError::SyscallError);
+        }
+        libc::EPERM => {
+            error!("Permission denied.");
+            return Err(EventOpenError::SyscallError);
+        }
+        _ => (),
+    };
 
     Ok(PerfEventHandle(fd))
 }
@@ -704,6 +694,49 @@ impl PerfEventHandle {
             }
         }
     }
+
+    pub fn reset(&self) -> Result<(), EventOpenError> {
+        // SAFETY:
+        match unsafe { libc::ioctl(self.0, perf_sys::perf_ioc_RESET as u64) } {
+            0 => {
+                debug!("Reset perf event.");
+                Ok(())
+            }
+            _ => {
+                error!("Failed to reset perf event.");
+                Err(EventOpenError::SyscallError)
+            }
+        }
+    }
+
+    pub fn disable(&self) -> Result<(), EventOpenError> {
+        // SAFETY: Struct owns the fd and it is safe to disable it with valid ioctl.
+        match unsafe { libc::ioctl(self.0, perf_sys::perf_ioc_DISABLE as u64) } {
+            0 => {
+                debug!("Disabled perf event.");
+                Ok(())
+            }
+            _ => {
+                error!("Failed to disable perf event.");
+                Err(EventOpenError::SyscallError)
+            }
+        }
+    }
+
+    pub fn read(&self, buf: &[u8], size: usize) -> Result<(), EventOpenError> {
+        // SAFETY: Struct owns the fd and it is safe to read from it with valid ioctl.
+        match unsafe { libc::read(self.0, buf.as_ptr() as *mut libc::c_void, size) } {
+            0 => {
+                debug!("Read perf event.");
+                Ok(())
+            }
+            _ => {
+                error!("Failed to read perf event.");
+                Err(EventOpenError::SyscallError)
+            }
+        }
+    }
+
     pub fn mmap_buffer(&self, mmap_size: usize) -> Result<PerfMmapBuf, EventOpenError> {
         // mmap size must be 1 + 2^n pages. First page is header page.
         if !(mmap_size - 1).is_power_of_two() {
@@ -735,6 +768,7 @@ impl Drop for PerfEventHandle {
         // SAFETY: Struct owns the fd and it is safe to close it with valid ioctl.
         unsafe {
             libc::ioctl(self.0, perf_sys::perf_ioc_DISABLE as u64);
+            libc::close(self.0);
         }
     }
 }
@@ -757,6 +791,31 @@ impl PerfMmapBuf {
     pub fn data_size(&self) -> u64 {
         // SAFETY: Mmap buffer is valid and contains the data_size field.
         unsafe { (*self.0).data_size }
+    }
+
+    pub fn time_enabled(&self) -> u64 {
+        // SAFETY: Mmap buffer is valid and contains the time_enabled field.
+        unsafe { (*self.0).time_enabled }
+    }
+
+    pub fn time_running(&self) -> u64 {
+        // SAFETY: Mmap buffer is valid and contains the time_running field.
+        unsafe { (*self.0).time_running }
+    }
+
+    pub fn index(&self) -> u32 {
+        // SAFETY: Mmap buffer is valid and contains the index field.
+        unsafe { (*self.0).index }
+    }
+
+    pub fn data_head(&self) -> u64 {
+        // SAFETY: Mmap buffer is valid and contains the data_head field.
+        unsafe { (*self.0).data_head }
+    }
+
+    pub fn data_tail(&self) -> u64 {
+        // SAFETY: Mmap buffer is valid and contains the data_tail field.
+        unsafe { (*self.0).data_tail }
     }
 
     fn data_ptr(&self) -> *mut u8 {
@@ -787,6 +846,13 @@ impl PerfMmapBuf {
     // Should T be Copy as well?
     pub unsafe fn read_sample<T: Sized>(&self, sample: &mut T) -> Result<(), EventOpenError> {
         let next_sample = self.next_sample();
+        debug!(
+            "Next sample @ {:p}: type: {}, misc: {}, size: {}",
+            next_sample,
+            (*next_sample).type_,
+            (*next_sample).misc,
+            (*next_sample).size
+        );
         let size = size_of::<T>() as u16;
         // SAFETY: next_sample is a valid pointer within the mmap buffer.
         let next_size = (*next_sample).size;
