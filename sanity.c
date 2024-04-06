@@ -54,8 +54,8 @@ int main_loop(struct perf_event_mmap_page* mmap_hdr) {
 			case PERF_RECORD_SAMPLE:
 				sample = (struct perf_sample*)event_hdr;
 				if (sample->addr != 0) {
-					printf("%ld,%d,%ld,%lx\n",
-						sample->ip, sample->tid, sample->time, sample->addr & ~(4096 -1));
+					printf("Code: %d, %ld,%d,%ld,%lx\n",
+						PERF_RECORD_SAMPLE, sample->ip, sample->tid, sample->time, sample->addr & ~(4096 -1));
 					//mmap_hdr->data_tail += event_hdr->size;
 				}
 				break;
@@ -80,7 +80,9 @@ main(int argc, char **argv)
 	pid = atoi(argv[1]);
     memset(&pe, 0, sizeof(pe));
     pe.type = PERF_TYPE_RAW;
-	pe.config = 0xd1 | (0x20 <<8);
+	uint64_t config = 0xd1 | (0x20 <<8);
+	printf("config: %lx\n", config);
+	pe.config = config;
 	pe.sample_period = SAMPLE_PERIOD;
 	//pe.sample_freq = SAMPLE_FREQ;
 	//pe.freq = 1;
