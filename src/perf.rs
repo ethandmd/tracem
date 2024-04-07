@@ -1,4 +1,9 @@
-use std::mem::zeroed;
+use std::{
+    fs::File,
+    mem::zeroed,
+    os::fd::{AsRawFd, FromRawFd},
+    ptr::copy_nonoverlapping,
+};
 
 use log::{debug, error};
 
@@ -6,12 +11,16 @@ pub mod perf_sys {
     include!(concat!(env!("OUT_DIR"), "/perf-sys.rs"));
 }
 
+use mio::{unix::SourceFd, Events, Interest, Poll, Token};
 pub use perf_sys::*;
+
+const MMAP_PAGES: usize = 1 + (1 << 16);
 
 #[derive(Debug)]
 pub enum PerfError {
     EventOpenError,
     MmapError,
+    PollError,
 }
 
 impl Default for perf_event_header {
@@ -29,93 +38,214 @@ impl Default for perf_event_attr {
 }
 
 impl perf_event_attr {
-    pub fn sample_period(&mut self, period: u64) {
+    pub fn set_sample_period(&mut self, period: u64) {
         match self.freq() {
             1 => self.set_freq(0),
             _ => (),
         };
         self.__bindgen_anon_1.sample_period = period;
     }
+    pub fn get_sample_period(&self) -> u64 {
+        unsafe { self.__bindgen_anon_1.sample_period }
+    }
+    pub fn get_sample_freq(&self) -> u64 {
+        unsafe { self.__bindgen_anon_1.sample_freq }
+    }
 }
 
-// TODO:
-// - Support event groups
-pub fn perf_event_open(
-    attr: perf_event_attr,
-    pid: i32,
-    cpu: i32,
-    flags: i32,
-) -> Result<i32, PerfError> {
-    let group = -1;
-    debug!(
-        "Opening perf event on pid: {}, cpu: {}, with flags: {}",
-        pid, cpu, flags
-    );
-    // SAFETY: SYS_perf_event_open syscall arguments are correct and return value is checked.
-    let fd =
-        unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, pid, cpu, group, flags) as i32 };
-    let event_fd = match fd {
-        libc::E2BIG => {
-            error!("Too many events or attributes specified.");
-            return Err(PerfError::EventOpenError);
-        }
-        libc::EACCES => {
-            error!("Permission denied.");
-            return Err(PerfError::EventOpenError);
-        }
-        libc::EBADF => {
-            error!("Invalid group file descriptor.");
-            return Err(PerfError::EventOpenError);
-        }
-        libc::EBUSY => {
-            error!("PMU exclusive access already taken.");
-            return Err(PerfError::EventOpenError);
-        }
-        libc::EFAULT => {
-            error!("Invalid attribute pointer.");
-            return Err(PerfError::EventOpenError);
-        }
-        libc::EINTR => {
-            error!("Mix perf and ftrace handling for a uprobe.");
-            return Err(PerfError::EventOpenError);
-        }
-        libc::EINVAL => {
-            error!("Invalid event argument. Consider if sample_freq > max, sample_type out of range,...");
-            return Err(PerfError::EventOpenError);
-        }
-        libc::EMFILE => {
-            error!("Too many open file descriptors.");
-            return Err(PerfError::EventOpenError);
-        }
-        libc::ENODEV => {
-            error!("Feature not supported on PMU.");
-            return Err(PerfError::EventOpenError);
-        }
-        libc::ENOENT => {
-            error!("type_ setting is not valid.");
-            return Err(PerfError::EventOpenError);
-        }
-        libc::ENOSYS => {
-            error!("Sample stack user set in sample_type and is not supported on hw.");
-            return Err(PerfError::EventOpenError);
-        }
-        libc::ENOTSUP => {
-            error!("Requested feature is not supported.");
-            return Err(PerfError::EventOpenError);
-        }
-        libc::EPERM => {
-            error!("Permission denied.");
-            return Err(PerfError::EventOpenError);
-        }
-        _ => fd,
-    };
-    Ok(event_fd)
+pub struct PerfEvent {
+    fd: File,
+    mmap_hdr: Option<*mut perf_event_mmap_page>,
+    mmap_size: usize,
 }
 
-pub unsafe fn mmap_perf_buffer(
-    fd: i32,
+impl PerfEvent {
+    // TODO:
+    // - Support event groups
+    pub fn new(attr: perf_event_attr, pid: i32, cpu: i32, flags: i32) -> Result<Self, PerfError> {
+        let group = -1;
+        debug!(
+            "Opening perf event on pid: {}, cpu: {}, with flags: {}",
+            pid, cpu, flags
+        );
+        // SAFETY: SYS_perf_event_open syscall arguments are correct and return value is checked.
+        let fd = unsafe {
+            libc::syscall(libc::SYS_perf_event_open, &attr, pid, cpu, group, flags) as i32
+        };
+        let event_fd = match fd {
+            libc::E2BIG => {
+                error!("Too many events or attributes specified.");
+                return Err(PerfError::EventOpenError);
+            }
+            libc::EACCES => {
+                error!("Permission denied.");
+                return Err(PerfError::EventOpenError);
+            }
+            libc::EBADF => {
+                error!("Invalid group file descriptor.");
+                return Err(PerfError::EventOpenError);
+            }
+            libc::EBUSY => {
+                error!("PMU exclusive access already taken.");
+                return Err(PerfError::EventOpenError);
+            }
+            libc::EFAULT => {
+                error!("Invalid attribute pointer.");
+                return Err(PerfError::EventOpenError);
+            }
+            libc::EINTR => {
+                error!("Mix perf and ftrace handling for a uprobe.");
+                return Err(PerfError::EventOpenError);
+            }
+            libc::EINVAL => {
+                error!("Invalid event argument. Consider if sample_freq > max, sample_type out of range,...");
+                return Err(PerfError::EventOpenError);
+            }
+            libc::EMFILE => {
+                error!("Too many open file descriptors.");
+                return Err(PerfError::EventOpenError);
+            }
+            libc::ENODEV => {
+                error!("Feature not supported on PMU.");
+                return Err(PerfError::EventOpenError);
+            }
+            libc::ENOENT => {
+                error!("type_ setting is not valid.");
+                return Err(PerfError::EventOpenError);
+            }
+            libc::ENOSYS => {
+                error!("Sample stack user set in sample_type and is not supported on hw.");
+                return Err(PerfError::EventOpenError);
+            }
+            libc::ENOTSUP => {
+                error!("Requested feature is not supported.");
+                return Err(PerfError::EventOpenError);
+            }
+            libc::EPERM => {
+                error!("Permission denied.");
+                return Err(PerfError::EventOpenError);
+            }
+            _ => fd,
+        };
+
+        // SAFETY: Can only be one owner of the file descriptor.
+        let mut event = unsafe {
+            Self {
+                fd: File::from_raw_fd(event_fd),
+                mmap_hdr: None,
+                mmap_size: 0,
+            }
+        };
+        if attr.get_sample_period() != 0 {
+            // SAFETY: fd is valid. If mmap fails, we return an error.
+            // On drop, PerfEvent struct will munmap the buffer.
+            unsafe {
+                let (mmap_hdr, mmap_size) = mmap_perf_buffer(&event.fd, MMAP_PAGES)?;
+                event.mmap_hdr = Some(mmap_hdr);
+                event.mmap_size = mmap_size;
+            }
+        }
+        Ok(event)
+    }
+
+    /// Main event loop for reading samples from the perf sample buffer.
+    /// Only valid if the perf event was created with a sample period/freq.
+    /// Caller provides a function, f, and a record type, record, to be called
+    /// in the event loop for SAMPLE_RECORD types *only*. This allows the caller
+    /// to define how each sample record is processed.
+    pub fn sample_loop<F>(&self, f: F, record_size: usize) -> Result<(), PerfError>
+    where
+        F: Fn(*const u8),
+    {
+        if let Some(mmap) = self.mmap_hdr {
+            // SAFETY: mmap ptr is valid. Data offset into mmap region is valid.
+            let sample_region = {
+                let begin = unsafe { mmap.byte_add((*mmap).data_offset as usize) };
+                if begin <= mmap {
+                    error!("Data offset is invalid: Less than or equal to mmap hdr.");
+                    return Err(PerfError::MmapError);
+                } else if begin > unsafe { mmap.byte_add(self.mmap_size) } {
+                    error!("Data offset is invalid: Greater than mmap size.");
+                    return Err(PerfError::MmapError);
+                } else {
+                    begin
+                }
+            };
+            let mut events = Events::with_capacity(128);
+            let TOKEN = Token(0);
+            let mut poll = Poll::new().map_err(|_| PerfError::PollError)?;
+            poll.registry()
+                .register(
+                    &mut SourceFd(&self.fd.as_raw_fd()),
+                    TOKEN,
+                    Interest::READABLE,
+                )
+                .map_err(|_| PerfError::PollError)?;
+            loop {
+                poll.poll(&mut events, None)
+                    .map_err(|_| PerfError::PollError)?;
+                for event in events.iter() {
+                    if event.token() == TOKEN {
+                        let mut record_buf: Vec<u8> = Vec::with_capacity(record_size);
+                        loop {
+                            // SAFETY: MMAP sample region bounds are valid and ring buffer is within bounds.
+                            // If the next sample record is larger than the difference between the
+                            // end of the buffer and the tail we read the record in two parts so
+                            // that we don't read past the end of the buffer.
+                            unsafe {
+                                let tail_mod = ((*mmap).data_tail % (*mmap).data_size) as usize;
+                                // Check that the next record is within the bounds of the ring.
+                                if record_size as u64 > (*mmap).data_head - (*mmap).data_tail {
+                                    break;
+                                }
+                                // Check the remaining space in the ring buffer in case we need to
+                                // wrap.
+                                let rem = (*mmap).data_size as usize - tail_mod;
+                                let rem = if rem < record_size { rem } else { record_size };
+                                // record buf outlives ptr, and rem is always less than or equal to record_size.
+                                // all ptr arithmetic is done as byte count, rem is counting bytes.
+                                copy_nonoverlapping(
+                                    sample_region.byte_add(tail_mod) as *const u8,
+                                    record_buf.as_mut_ptr(),
+                                    rem,
+                                );
+                                if rem < record_size {
+                                    copy_nonoverlapping(
+                                        sample_region as *const u8,
+                                        record_buf.as_mut_ptr().byte_add(rem),
+                                        record_size - rem,
+                                    );
+                                }
+                                // Invoke caller provided function with sample header.
+                                f(record_buf.as_ptr().into());
+                                (*mmap).data_tail += record_size as u64;
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            error!("No perf buffer to read samples from.");
+            return Err(PerfError::MmapError);
+        }
+    }
+}
+
+impl Drop for PerfEvent {
+    fn drop(&mut self) {
+        if let Some(mmap) = self.mmap_hdr {
+            // SAFETY: mmap ptr is valid.
+            unsafe {
+                libc::munmap(mmap as *mut libc::c_void, self.mmap_size);
+            }
+        }
+    }
+}
+
+unsafe fn mmap_perf_buffer(
+    fd: &File,
     num_pages: usize,
-) -> Result<*mut perf_event_mmap_page, PerfError> {
+) -> Result<(*mut perf_event_mmap_page, usize), PerfError> {
     // SAFETY: Just out here getting page size.
     let page_size = match libc::sysconf(libc::_SC_PAGESIZE) {
         -1 => {
@@ -137,13 +267,13 @@ pub unsafe fn mmap_perf_buffer(
         mmap_size,
         libc::PROT_READ | libc::PROT_WRITE,
         libc::MAP_SHARED,
-        fd,
+        fd.as_raw_fd(),
         0,
     ) {
         libc::MAP_FAILED => {
             error!("Failed to mmap perf buffer.");
             return Err(PerfError::MmapError);
         }
-        ptr => Ok(ptr as *mut perf_event_mmap_page),
+        ptr => Ok((ptr as *mut perf_event_mmap_page, mmap_size)),
     }
 }
