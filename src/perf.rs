@@ -5,7 +5,7 @@ use std::{
     ptr::copy_nonoverlapping,
 };
 
-use log::{debug, error};
+use log::{debug, error, info};
 
 pub mod perf_sys {
     include!(concat!(env!("OUT_DIR"), "/perf-sys.rs"));
@@ -153,6 +153,7 @@ impl PerfEvent {
     /// Caller provides a function, f, and a record type, record, to be called
     /// in the event loop for SAMPLE_RECORD types *only*. This allows the caller
     /// to define how each sample record is processed.
+    /// struct. This function then blindly trusts
     pub fn sample_loop<F>(&self, f: F, record_size: usize) -> Result<(), PerfError>
     where
         F: Fn(*const u8),
@@ -181,11 +182,15 @@ impl PerfEvent {
                     Interest::READABLE,
                 )
                 .map_err(|_| PerfError::PollError)?;
+            let mut overflows = 0;
+            let mut total_events_read = 0;
             loop {
                 poll.poll(&mut events, None)
                     .map_err(|_| PerfError::PollError)?;
                 for event in events.iter() {
+                    overflows += 1;
                     if event.token() == TOKEN {
+                        let mut events_read = 0;
                         let mut record_buf: Vec<u8> = Vec::with_capacity(record_size);
                         loop {
                             // SAFETY: MMAP sample region bounds are valid and ring buffer is within bounds.
@@ -196,6 +201,9 @@ impl PerfEvent {
                                 let tail_mod = ((*mmap).data_tail % (*mmap).data_size) as usize;
                                 // Check that the next record is within the bounds of the ring.
                                 if record_size as u64 > (*mmap).data_head - (*mmap).data_tail {
+                                    info!("Overflows: {}", overflows);
+                                    info!("Events read: {}", events_read);
+                                    info!("Total events read: {}", total_events_read);
                                     break;
                                 }
                                 // Check the remaining space in the ring buffer in case we need to
@@ -216,8 +224,20 @@ impl PerfEvent {
                                         record_size - rem,
                                     );
                                 }
-                                // Invoke caller provided function with sample header.
-                                f(record_buf.as_ptr().into());
+                                // Check the record type, we only care about SAMPLE_RECORDs for
+                                // now.
+                                // SAFETY: record_buf ptr is pointing to data that always has
+                                // size_of::<perf_event_header>() bytes at the beginning.
+                                let hdr: *const perf_event_header = record_buf.as_ptr().cast();
+                                if (*hdr).type_ == perf_event_type_PERF_RECORD_SAMPLE {
+                                    // Invoke caller provided function with ptr to raw bytes.
+                                    // Asking the caller to make an implicit assumption
+                                    // about the size and type of the record is not ideal.
+                                    // TODO: Consider a more type safe approach.
+                                    f(record_buf.as_ptr().into());
+                                }
+                                events_read += 1;
+                                total_events_read += 1;
                                 (*mmap).data_tail += record_size as u64;
                             }
                         }
