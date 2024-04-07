@@ -10,10 +10,13 @@ use std::{
 
 use clap::Parser;
 use log::{debug, error};
-use perf::perf_sys::{
-    perf_event_attr, perf_event_header, perf_event_sample_format_PERF_SAMPLE_ADDR,
-    perf_event_sample_format_PERF_SAMPLE_TID, perf_event_sample_format_PERF_SAMPLE_TIME,
-    perf_type_id_PERF_TYPE_RAW,
+use perf::{
+    perf_event_sample_format_PERF_SAMPLE_IDENTIFIER,
+    perf_sys::{
+        perf_event_attr, perf_event_header, perf_event_sample_format_PERF_SAMPLE_ADDR,
+        perf_event_sample_format_PERF_SAMPLE_TID, perf_event_sample_format_PERF_SAMPLE_TIME,
+        perf_type_id_PERF_TYPE_RAW,
+    },
 };
 
 use crate::perf::{perf_event_sample_format_PERF_SAMPLE_IP, PerfEvent};
@@ -21,13 +24,15 @@ use crate::perf::{perf_event_sample_format_PERF_SAMPLE_IP, PerfEvent};
 mod perf;
 
 const SAMPLE_FREQ: u64 = 4000;
-const SAMPLE_PERIOD: u64 = 10000;
+const SAMPLE_PERIOD: u64 = 1000;
 
+#[repr(u64)]
 enum TglPebs {
     L3_miss = 0xd1 | (0x20 << 8),
     All_stores = 0xd0 | (0x82 << 8),
 }
 
+#[repr(u64)]
 enum SkxPebs {
     L3_miss = 0x4f | (0x01 << 8),
     All_stores = 0x4f | (0x02 << 8),
@@ -47,6 +52,7 @@ struct Args {
 #[repr(C)]
 struct demo_record {
     hdr: perf_event_header,
+    id: u64,
     ip: u64,
     tid: u64,
     time: u64,
@@ -86,51 +92,13 @@ struct demo_record {
 //
 //impl Eq for AccessTracker {}
 
-//unsafe fn read_samples(mmap: *mut perf::perf_event_mmap_page) {
-//    let mut stat = HashMap::new();
-//    let mut heap = BinaryHeap::new();
-//    println!("tid,time,addr,cpu,phys_addr");
-//    let data_begin = mmap.byte_add((*mmap).data_offset as usize);
-//    debug!("Data offset: {:#02x}", (*mmap).data_offset);
-//    debug!("Data size: {:#02x}", (*mmap).data_size);
-//    debug!("Data begin: {:p}", data_begin);
-//    debug!("Region begin: {:p}", mmap);
-//    let mut flag = false;
-//    loop {
-//        let next = ((*mmap).data_tail % (*mmap).data_size) as usize;
-//        let hdr: *const perf_event_header = data_begin.byte_add(next).cast();
-//        match (*hdr).type_ {
-//            perf_event_type_PERF_RECORD_SAMPLE => {
-//                let sample: *const demo_record = hdr.cast();
-//                if (*sample).addr == 0 {
-//                    continue;
-//                }
-//                let page = (*sample).addr & !4095;
-//                let record = stat.entry(page).or_insert_with(|| {
-//                    flag = true;
-//                    debug!("Sample: {:#02x}", page);
-//                    AccessTracker::new(page)
-//                });
-//                (*record).update(1.0);
-//                if flag {
-//                    heap.push(*record);
-//                    flag = false;
-//                }
-//            }
-//            _ => {
-//                //debug!("Unknown record type: {}", (*hdr).type_);
-//            }
-//        }
-//        (*mmap).data_tail += (*hdr).size as u64;
-//    }
-//}
-
 // Caller must ensure ptr is valid.
 fn process_sample(sample: *const u8) {
     unsafe {
         let sample: *const demo_record = sample.cast();
         debug!(
-            "{:#02x},{},{},{:#02x}",
+            "[ID: {}] {:#02x},{},{},{:#02x}",
+            (*sample).id,
             (*sample).ip,
             (*sample).tid,
             (*sample).time,
@@ -139,50 +107,63 @@ fn process_sample(sample: *const u8) {
     }
 }
 
-fn main() {
-    env_logger::init();
-    let args = Args::parse();
-    let l3_miss = match args.uarch.as_str() {
-        "tgl" => Some(TglPebs::L3_miss as u64),
-        "skx" => Some(SkxPebs::L3_miss as u64),
-        _ => {
-            error!("Unknown uarch");
-            None
-        }
-    };
-    debug!("Raw Event: {:#02x}", l3_miss.unwrap());
-    //let all_stores = match args.uarch.as_str() {
-    //    "tgl" => Some(TglPebs::All_stores as u64),
-    //    "skx" => Some(SkxPebs::All_stores as u64),
-    //    _ => {
-    //        error!("Unknown uarch");
-    //        None
-    //    }
-    //};
+fn build_mem_event(event: u64, disabled: bool) -> perf_event_attr {
     let mut attr = perf_event_attr::default();
     attr.type_ = perf_type_id_PERF_TYPE_RAW;
-    attr.config = if let Some(reads) = l3_miss {
-        reads
-    } else {
-        error!("Unknown uarch");
-        panic!();
-    };
+    attr.config = event;
     attr.set_sample_period(SAMPLE_PERIOD);
-    attr.sample_type = perf_event_sample_format_PERF_SAMPLE_IP
+    attr.sample_type = perf_event_sample_format_PERF_SAMPLE_IDENTIFIER
+        | perf_event_sample_format_PERF_SAMPLE_IP
         | perf_event_sample_format_PERF_SAMPLE_TID
         | perf_event_sample_format_PERF_SAMPLE_TIME
         | perf_event_sample_format_PERF_SAMPLE_ADDR;
     attr.__bindgen_anon_2.wakeup_events = (SAMPLE_PERIOD / 4) as u32;
     //attr.set_watermark(1); // Set this for wakeup watermark
+    if disabled {
+        attr.set_disabled(1);
+    }
     attr.set_exclude_hv(1);
     attr.set_exclude_callchain_user(1);
     attr.set_exclude_callchain_kernel(1);
     attr.set_precise_ip(2);
-    let event = PerfEvent::new(attr, args.pid, args.cpu, 0).unwrap();
-    event
+    attr
+}
+
+fn main() {
+    env_logger::init();
+    let args = Args::parse();
+    let l3_miss = match args.uarch.as_str() {
+        "tgl" => TglPebs::L3_miss as u64,
+        "skx" => SkxPebs::L3_miss as u64,
+        _ => {
+            error!("Unknown uarch");
+            return;
+        }
+    };
+    debug!("Raw Event: {:#02x}", l3_miss);
+    let all_stores = match args.uarch.as_str() {
+        "tgl" => TglPebs::All_stores as u64,
+        "skx" => SkxPebs::All_stores as u64,
+        _ => {
+            error!("Unknown uarch");
+            return;
+        }
+    };
+    debug!("Raw Event: {:#02x}", all_stores);
+    let mem_read = build_mem_event(l3_miss, true);
+    let mem_store = build_mem_event(all_stores, false);
+    let group_leader = PerfEvent::new(mem_read, args.pid, args.cpu, None, 0).unwrap();
+    let _group_follow = PerfEvent::new(
+        mem_store,
+        args.pid,
+        args.cpu,
+        Some(group_leader.get_fd()),
+        0,
+    )
+    .unwrap();
+    group_leader.reset().unwrap();
+    group_leader.enable().unwrap();
+    group_leader
         .sample_loop(process_sample, size_of::<demo_record>())
         .unwrap();
-    //perf::perf_event_open(attr, args.pid as i32, args.cpu, 0).unwrap();
-    //let mmap = unsafe { perf::mmap_perf_buffer(&event_fd, MMAP_PAGES).unwrap() };
-    //unsafe { read_samples(mmap) };
 }

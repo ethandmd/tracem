@@ -14,7 +14,7 @@ pub mod perf_sys {
 use mio::{unix::SourceFd, Events, Interest, Poll, Token};
 pub use perf_sys::*;
 
-const MMAP_PAGES: usize = 1 + (1 << 16);
+const MMAP_PAGES: usize = 1 + (1 << 16); // 1MiB
 
 #[derive(Debug)]
 pub enum PerfError {
@@ -60,83 +60,39 @@ pub struct PerfEvent {
 }
 
 impl PerfEvent {
-    // TODO:
-    // - Support event groups
-    pub fn new(attr: perf_event_attr, pid: i32, cpu: i32, flags: i32) -> Result<Self, PerfError> {
-        let group = -1;
+    pub fn new(
+        attr: perf_event_attr,
+        pid: i32,
+        cpu: i32,
+        group: Option<&File>,
+        flags: i32,
+    ) -> Result<Self, PerfError> {
+        let group_fd = match group {
+            Some(g) => g.as_raw_fd(),
+            None => -1,
+        };
         debug!(
             "Opening perf event on pid: {}, cpu: {}, with flags: {}",
             pid, cpu, flags
         );
         // SAFETY: SYS_perf_event_open syscall arguments are correct and return value is checked.
         let fd = unsafe {
-            libc::syscall(libc::SYS_perf_event_open, &attr, pid, cpu, group, flags) as i32
+            libc::syscall(libc::SYS_perf_event_open, &attr, pid, cpu, group_fd, flags) as i32
         };
-        let event_fd = match fd {
-            libc::E2BIG => {
-                error!("Too many events or attributes specified.");
-                return Err(PerfError::EventOpenError);
-            }
-            libc::EACCES => {
-                error!("Permission denied.");
-                return Err(PerfError::EventOpenError);
-            }
-            libc::EBADF => {
-                error!("Invalid group file descriptor.");
-                return Err(PerfError::EventOpenError);
-            }
-            libc::EBUSY => {
-                error!("PMU exclusive access already taken.");
-                return Err(PerfError::EventOpenError);
-            }
-            libc::EFAULT => {
-                error!("Invalid attribute pointer.");
-                return Err(PerfError::EventOpenError);
-            }
-            libc::EINTR => {
-                error!("Mix perf and ftrace handling for a uprobe.");
-                return Err(PerfError::EventOpenError);
-            }
-            libc::EINVAL => {
-                error!("Invalid event argument. Consider if sample_freq > max, sample_type out of range,...");
-                return Err(PerfError::EventOpenError);
-            }
-            libc::EMFILE => {
-                error!("Too many open file descriptors.");
-                return Err(PerfError::EventOpenError);
-            }
-            libc::ENODEV => {
-                error!("Feature not supported on PMU.");
-                return Err(PerfError::EventOpenError);
-            }
-            libc::ENOENT => {
-                error!("type_ setting is not valid.");
-                return Err(PerfError::EventOpenError);
-            }
-            libc::ENOSYS => {
-                error!("Sample stack user set in sample_type and is not supported on hw.");
-                return Err(PerfError::EventOpenError);
-            }
-            libc::ENOTSUP => {
-                error!("Requested feature is not supported.");
-                return Err(PerfError::EventOpenError);
-            }
-            libc::EPERM => {
-                error!("Permission denied.");
-                return Err(PerfError::EventOpenError);
-            }
-            _ => fd,
-        };
+        if fd < 0 {
+            error!("Failed to open perf event.");
+            return Err(PerfError::EventOpenError);
+        }
 
         // SAFETY: Can only be one owner of the file descriptor.
         let mut event = unsafe {
             Self {
-                fd: File::from_raw_fd(event_fd),
+                fd: File::from_raw_fd(fd),
                 mmap_hdr: None,
                 mmap_size: 0,
             }
         };
-        if attr.get_sample_period() != 0 {
+        if attr.get_sample_period() != 0 && group.is_none() {
             // SAFETY: fd is valid. If mmap fails, we return an error.
             // On drop, PerfEvent struct will munmap the buffer.
             unsafe {
@@ -145,7 +101,42 @@ impl PerfEvent {
                 event.mmap_size = mmap_size;
             }
         }
+        if let Some(group_fd) = group {
+            // SAFETY: fd is valid. If ioctl fails, we return an error.
+            // On drop, PerfEvent struct will close the file descriptor.
+            unsafe {
+                let ret = libc::ioctl(fd, perf_ioc_SET_OUTPUT as u64, group_fd.as_raw_fd());
+                if ret != 0 {
+                    error!("Failed to set output group.");
+                    return Err(PerfError::EventOpenError);
+                }
+            }
+        }
         Ok(event)
+    }
+
+    pub fn enable(&self) -> Result<(), PerfError> {
+        // SAFETY: fd is valid. If ioctl fails, we return an error.
+        let ret = unsafe { libc::ioctl(self.fd.as_raw_fd(), perf_ioc_ENABLE as u64, 0) };
+        if ret != 0 {
+            error!("Failed to enable perf event.");
+            return Err(PerfError::EventOpenError);
+        }
+        Ok(())
+    }
+
+    pub fn reset(&self) -> Result<(), PerfError> {
+        // SAFETY: fd is valid. If ioctl fails, we return an error.
+        let ret = unsafe { libc::ioctl(self.fd.as_raw_fd(), perf_ioc_RESET as u64, 0) };
+        if ret != 0 {
+            error!("Failed to reset perf event.");
+            return Err(PerfError::EventOpenError);
+        }
+        Ok(())
+    }
+
+    pub fn get_fd(&self) -> &File {
+        &self.fd
     }
 
     /// Main event loop for reading samples from the perf sample buffer.
@@ -189,7 +180,7 @@ impl PerfEvent {
                     .map_err(|_| PerfError::PollError)?;
                 for event in events.iter() {
                     overflows += 1;
-                    if event.token() == TOKEN {
+                    if event.token() == TOKEN && event.is_readable() {
                         let mut events_read = 0;
                         let mut record_buf: Vec<u8> = Vec::with_capacity(record_size);
                         loop {
@@ -241,6 +232,9 @@ impl PerfEvent {
                                 (*mmap).data_tail += record_size as u64;
                             }
                         }
+                    } else if event.is_read_closed() {
+                        info!("Read closed.");
+                        return Ok(());
                     }
                 }
             }
@@ -254,9 +248,13 @@ impl PerfEvent {
 impl Drop for PerfEvent {
     fn drop(&mut self) {
         if let Some(mmap) = self.mmap_hdr {
+            debug!("Unmapping perf buffer...");
             // SAFETY: mmap ptr is valid.
-            unsafe {
-                libc::munmap(mmap as *mut libc::c_void, self.mmap_size);
+            let ret = unsafe { libc::munmap(mmap as *mut libc::c_void, self.mmap_size) };
+            if ret != 0 {
+                error!("Failed to munmap perf buffer.");
+            } else {
+                debug!("Successfully unmapped perf buffer.");
             }
         }
     }
