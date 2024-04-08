@@ -1,6 +1,5 @@
 #include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
-
 // Bindgen doesn't seem to grab these macro definitions.
 // Redefining macros
 const int perf_ioc_ENABLE = 9216;

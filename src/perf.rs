@@ -18,9 +18,9 @@ const MMAP_PAGES: usize = 1 + (1 << 16); // 1MiB
 
 #[derive(Debug)]
 pub enum PerfError {
-    EventOpenError,
-    MmapError,
-    PollError,
+    EventOpen,
+    Mmap,
+    Poll,
 }
 
 impl Default for perf_event_header {
@@ -39,10 +39,9 @@ impl Default for perf_event_attr {
 
 impl perf_event_attr {
     pub fn set_sample_period(&mut self, period: u64) {
-        match self.freq() {
-            1 => self.set_freq(0),
-            _ => (),
-        };
+        if self.freq() == 1 {
+            self.set_freq(0);
+        }
         self.__bindgen_anon_1.sample_period = period;
     }
     pub fn get_sample_period(&self) -> u64 {
@@ -81,7 +80,7 @@ impl PerfEvent {
         };
         if fd < 0 {
             error!("Failed to open perf event.");
-            return Err(PerfError::EventOpenError);
+            return Err(PerfError::EventOpen);
         }
 
         // SAFETY: Can only be one owner of the file descriptor.
@@ -108,7 +107,7 @@ impl PerfEvent {
                 let ret = libc::ioctl(fd, perf_ioc_SET_OUTPUT as u64, group_fd.as_raw_fd());
                 if ret != 0 {
                     error!("Failed to set output group.");
-                    return Err(PerfError::EventOpenError);
+                    return Err(PerfError::EventOpen);
                 }
             }
         }
@@ -120,7 +119,7 @@ impl PerfEvent {
         let ret = unsafe { libc::ioctl(self.fd.as_raw_fd(), perf_ioc_ENABLE as u64, 0) };
         if ret != 0 {
             error!("Failed to enable perf event.");
-            return Err(PerfError::EventOpenError);
+            return Err(PerfError::EventOpen);
         }
         Ok(())
     }
@@ -130,7 +129,7 @@ impl PerfEvent {
         let ret = unsafe { libc::ioctl(self.fd.as_raw_fd(), perf_ioc_RESET as u64, 0) };
         if ret != 0 {
             error!("Failed to reset perf event.");
-            return Err(PerfError::EventOpenError);
+            return Err(PerfError::EventOpen);
         }
         Ok(())
     }
@@ -145,9 +144,14 @@ impl PerfEvent {
     /// in the event loop for SAMPLE_RECORD types *only*. This allows the caller
     /// to define how each sample record is processed.
     /// struct. This function then blindly trusts
-    pub fn sample_loop<F>(&self, f: F, record_size: usize) -> Result<(), PerfError>
+    pub fn sample_loop<F, T: super::PolicyTracker>(
+        &self,
+        f: F,
+        record_size: usize,
+        tracker: &mut T,
+    ) -> Result<(), PerfError>
     where
-        F: Fn(*const u8),
+        F: Fn(*const u8, &mut T),
     {
         if let Some(mmap) = self.mmap_hdr {
             // SAFETY: mmap ptr is valid. Data offset into mmap region is valid.
@@ -155,29 +159,28 @@ impl PerfEvent {
                 let begin = unsafe { mmap.byte_add((*mmap).data_offset as usize) };
                 if begin <= mmap {
                     error!("Data offset is invalid: Less than or equal to mmap hdr.");
-                    return Err(PerfError::MmapError);
+                    return Err(PerfError::Mmap);
                 } else if begin > unsafe { mmap.byte_add(self.mmap_size) } {
                     error!("Data offset is invalid: Greater than mmap size.");
-                    return Err(PerfError::MmapError);
+                    return Err(PerfError::Mmap);
                 } else {
                     begin
                 }
             };
             let mut events = Events::with_capacity(128);
             let TOKEN = Token(0);
-            let mut poll = Poll::new().map_err(|_| PerfError::PollError)?;
+            let mut poll = Poll::new().map_err(|_| PerfError::Poll)?;
             poll.registry()
                 .register(
                     &mut SourceFd(&self.fd.as_raw_fd()),
                     TOKEN,
                     Interest::READABLE,
                 )
-                .map_err(|_| PerfError::PollError)?;
+                .map_err(|_| PerfError::Poll)?;
             let mut overflows = 0;
             let mut total_events_read = 0;
             loop {
-                poll.poll(&mut events, None)
-                    .map_err(|_| PerfError::PollError)?;
+                poll.poll(&mut events, None).map_err(|_| PerfError::Poll)?;
                 for event in events.iter() {
                     overflows += 1;
                     if event.token() == TOKEN && event.is_readable() {
@@ -192,9 +195,9 @@ impl PerfEvent {
                                 let tail_mod = ((*mmap).data_tail % (*mmap).data_size) as usize;
                                 // Check that the next record is within the bounds of the ring.
                                 if record_size as u64 > (*mmap).data_head - (*mmap).data_tail {
-                                    info!("Overflows: {}", overflows);
-                                    info!("Events read: {}", events_read);
-                                    info!("Total events read: {}", total_events_read);
+                                    debug!("Overflows: {}", overflows);
+                                    debug!("Events read: {}", events_read);
+                                    debug!("Total events read: {}", total_events_read);
                                     break;
                                 }
                                 // Check the remaining space in the ring buffer in case we need to
@@ -225,13 +228,14 @@ impl PerfEvent {
                                     // Asking the caller to make an implicit assumption
                                     // about the size and type of the record is not ideal.
                                     // TODO: Consider a more type safe approach.
-                                    f(record_buf.as_ptr().into());
+                                    f(record_buf.as_ptr(), tracker);
                                 }
                                 events_read += 1;
                                 total_events_read += 1;
                                 (*mmap).data_tail += record_size as u64;
                             }
                         }
+                        tracker.execute();
                     } else if event.is_read_closed() {
                         info!("Read closed.");
                         return Ok(());
@@ -240,7 +244,7 @@ impl PerfEvent {
             }
         } else {
             error!("No perf buffer to read samples from.");
-            return Err(PerfError::MmapError);
+            Err(PerfError::Mmap)
         }
     }
 }
@@ -268,7 +272,7 @@ unsafe fn mmap_perf_buffer(
     let page_size = match libc::sysconf(libc::_SC_PAGESIZE) {
         -1 => {
             error!("Failed to get page size.");
-            return Err(PerfError::MmapError);
+            return Err(PerfError::Mmap);
         }
         size => size as usize,
     };
@@ -277,7 +281,7 @@ unsafe fn mmap_perf_buffer(
     // MMAP region must be 1 + 2^n pages. First for header page and then ring buffer.
     if ((num_pages - 1) & (num_pages - 2)) != 0 {
         error!("Number of pages must be 1 + 2^n.");
-        return Err(PerfError::MmapError);
+        return Err(PerfError::Mmap);
     }
     // SAFETY: Caller is responsible for ensuring that the file descriptor is valid.
     match libc::mmap(
@@ -290,7 +294,7 @@ unsafe fn mmap_perf_buffer(
     ) {
         libc::MAP_FAILED => {
             error!("Failed to mmap perf buffer.");
-            return Err(PerfError::MmapError);
+            Err(PerfError::Mmap)
         }
         ptr => Ok((ptr as *mut perf_event_mmap_page, mmap_size)),
     }
