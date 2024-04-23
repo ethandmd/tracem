@@ -144,15 +144,11 @@ impl PerfEvent {
     /// in the event loop for SAMPLE_RECORD types *only*. This allows the caller
     /// to define how each sample record is processed.
     /// struct. This function then blindly trusts
-    pub fn sample_loop<F, T: super::PolicyTracker>(
+    pub fn sample_loop<T: super::Tracker>(
         &self,
-        f: F,
         record_size: usize,
         tracker: &mut T,
-    ) -> Result<(), PerfError>
-    where
-        F: Fn(*const u8, &mut T),
-    {
+    ) -> Result<(), PerfError> {
         if let Some(mmap) = self.mmap_hdr {
             // SAFETY: mmap ptr is valid. Data offset into mmap region is valid.
             let sample_region = {
@@ -195,9 +191,9 @@ impl PerfEvent {
                                 let tail_mod = ((*mmap).data_tail % (*mmap).data_size) as usize;
                                 // Check that the next record is within the bounds of the ring.
                                 if record_size as u64 > (*mmap).data_head - (*mmap).data_tail {
-                                    debug!("Overflows: {}", overflows);
-                                    debug!("Events read: {}", events_read);
-                                    debug!("Total events read: {}", total_events_read);
+                                    //debug!("Overflows: {}", overflows);
+                                    //debug!("Events read: {}", events_read);
+                                    //debug!("Total events read: {}", total_events_read);
                                     break;
                                 }
                                 // Check the remaining space in the ring buffer in case we need to
@@ -228,7 +224,7 @@ impl PerfEvent {
                                     // Asking the caller to make an implicit assumption
                                     // about the size and type of the record is not ideal.
                                     // TODO: Consider a more type safe approach.
-                                    f(record_buf.as_ptr(), tracker);
+                                    tracker.handle_sample(record_buf.as_ptr());
                                 }
                                 events_read += 1;
                                 total_events_read += 1;
