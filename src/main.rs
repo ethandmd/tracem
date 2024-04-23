@@ -36,7 +36,7 @@ mod perf;
 
 type PageT = u64;
 type CostT = u64;
-type NodeT = u32;
+type NodeT = (u32, i32); // Node id, (success/failed) migration count
 
 const SAMPLE_FREQ: u64 = 4000;
 const PAGE_SIZE: u64 = 4096;
@@ -135,8 +135,14 @@ impl Policy {
     fn execute(target_pid: i32, tracking: Arc<RwLock<HashMap<PageT, (CostT, NodeT)>>>) {
         // Update tiers lists
         let entries = tracking.read().unwrap();
-        let fast_tier_len = entries.iter().filter(|(_, (_, node))| *node == 0).count();
-        let slow_tier_len = entries.iter().filter(|(_, (_, node))| *node == 1).count();
+        let fast_tier_len = entries
+            .iter()
+            .filter(|(_, (_, node))| (*node).0 == 0)
+            .count();
+        let slow_tier_len = entries
+            .iter()
+            .filter(|(_, (_, node))| (*node).0 == 1)
+            .count();
         // * Threshold conditions check*
         // Maintain ratio of 4:1 for tier 0 to tier 1
         // If fast tier is 4 times larger than slow tier, migrate pages from fast to slow
@@ -148,7 +154,7 @@ impl Policy {
         };
         let mut candidates = entries
             .iter()
-            .filter(|(_, (_, node))| *node == 1 - target_node)
+            .filter(|(_, (_, node))| (*node).0 == 1 - target_node && (*node).1 > -10)
             .map(|(addr, _)| *addr)
             .take(ratio)
             .collect::<Vec<_>>();
@@ -171,12 +177,12 @@ impl Policy {
         } else {
             let mut entries = tracking.write().unwrap();
             for (p, s) in candidates.iter().zip(status.iter()) {
-                if *s < 0 {
-                    error!("Failed to move page {:#x}.", p);
-                } else {
-                    if let Some((_, node)) = entries.get_mut(p) {
-                        // Checked that status is non-negative
-                        *node = *s as u32;
+                if let Some((_, node)) = entries.get_mut(p) {
+                    // Check that status is non-negative
+                    if *s < 0 {
+                        (*node).1 -= 1;
+                    } else {
+                        (*node).0 = *s as u32;
                     }
                 }
             }
@@ -212,7 +218,7 @@ impl PolTracker {
     fn start_policy(&mut self) {
         self.pol_thread
             .start(self.pid, self.pol_flag.clone(), self.inner.clone());
-        info!("Started policy thread.");
+        debug!("Started policy thread.");
     }
 }
 
@@ -229,7 +235,7 @@ impl Tracker for PolTracker {
     fn update(&mut self, page: PageT) {
         //let entry = self.inner.entry(page).or_insert(0);
         if let Ok(mut inner) = self.inner.write() {
-            let entry = inner.entry(page).or_insert((0, 0));
+            let entry = inner.entry(page).or_insert((0, (0, 0)));
             (*entry).0 += 1;
         } else {
             error!("Failed to update page cost.");
@@ -244,15 +250,35 @@ impl Tracker for PolTracker {
     fn debug_summary(&self) {
         let entries = self.inner.read().unwrap();
         info!("Total pages: {}", entries.len());
+        info!(
+            "Tier 0 pages: {}",
+            entries
+                .iter()
+                .filter(|(_, (_, node))| (*node).0 == 0)
+                .count()
+        );
+        info!(
+            "Tier 1 pages: {}",
+            entries
+                .iter()
+                .filter(|(_, (_, node))| (*node).0 == 1)
+                .count()
+        );
         let mut entries = entries.iter().collect::<Vec<_>>();
         let sample_n = entries.len().min(10);
         entries.sort_by(|a, b| a.1.partial_cmp(b.1).unwrap());
         for (addr, cost) in entries.iter().rev().take(sample_n) {
-            info!("{:#x}: {:.2}, node: {}", addr, cost.0, cost.1);
+            info!(
+                "{:#x}: {:.2}, node: {}, migration fails: {}",
+                addr, cost.0, cost.1 .0, cost.1 .1
+            );
         }
 
         for (addr, cost) in entries.iter().take(sample_n) {
-            info!("{:#x}: {:.2}, node: {}", addr, cost.0, cost.1);
+            info!(
+                "{:#x}: {:.2}, node: {}, migration fails: {}",
+                addr, cost.0, cost.1 .0, cost.1 .1
+            );
         }
     }
     // Caller must ensure ptr is valid.
