@@ -313,11 +313,11 @@ fn build_mem_event(
         ..Default::default()
     };
     attr.set_sample_period(args.sample_period);
-    attr.sample_type = perf_event_sample_format_PERF_SAMPLE_IDENTIFIER
+    attr.sample_type = (perf_event_sample_format_PERF_SAMPLE_IDENTIFIER
         | perf_event_sample_format_PERF_SAMPLE_IP
         | perf_event_sample_format_PERF_SAMPLE_TID
         | perf_event_sample_format_PERF_SAMPLE_TIME
-        | perf_event_sample_format_PERF_SAMPLE_ADDR;
+        | perf_event_sample_format_PERF_SAMPLE_ADDR) as u64;
     attr.__bindgen_anon_2.wakeup_events = (args.sample_period / 4) as u32;
     //attr.set_watermark(1); // Set this for wakeup watermark
     if disabled {
